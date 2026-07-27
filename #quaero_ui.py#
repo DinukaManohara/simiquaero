@@ -1,0 +1,408 @@
+"""quaero_ui.py — Tk UI to formulate distributional queries and visualise results.
+
+Left panel: build a target distribution from mixture components, set a cardinality
+percentage (with a live feasibility check), and run the query.
+Right panel: live pdf preview, result histogram, and the induced DNF rule.
+
+Backend: the quaero_tree pipeline (decision-tree index -> subtree-first selection
+-> lossless reduction to a DNF rule), embedded below so the app is standalone.
+"""
+import math
+import numpy as np
+import pandas as pd
+from scipy import stats as scipy_stats
+from sklearn.tree import DecisionTreeClassifier
+
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+import tkinter as tk
+from tkinter import ttk, scrolledtext
+
+
+# ----------------------------------------------------------------------------
+# Pipeline (embedded from quaero_tree)
+# ----------------------------------------------------------------------------
+def bin_target(df, target_col):
+    x = df[target_col].dropna().values
+    std = np.std(x, ddof=1)
+    h = 3.5 * std * (len(x) ** (-1 / 3))
+    n_bins = max(1, math.ceil((x.max() - x.min()) / h))
+    ids = pd.cut(df[target_col], bins=n_bins, labels=range(n_bins),
+                 include_lowest=True).astype(int).to_numpy()
+    return ids, n_bins
+
+
+def _bin_centers(df, target_col, n_bins):
+    lo, hi = df[target_col].min(), df[target_col].max()
+    e = np.linspace(lo, hi, n_bins + 1)
+    return (e[:-1] + e[1:]) / 2
+
+
+def make_pdf(spec):
+    DIST = {"gaussian": scipy_stats.norm, "normal": scipy_stats.norm,
+            "exponential": scipy_stats.expon, "uniform": scipy_stats.uniform,
+            "beta": scipy_stats.beta}
+    if isinstance(spec, tuple):
+        name, p = spec; d = DIST[name.lower()]
+        return lambda x: d.pdf(x, **p)
+    tot = sum(w for *_, w in spec) or 1.0
+    comp = [(DIST[n.lower()], p, w / tot) for n, p, w in spec]
+    return lambda x: sum(w * d.pdf(x, **p) for d, p, w in comp)
+
+
+def build_index(df, target_col, desc_cols=None):
+    if desc_cols is None:
+        desc_cols = [c for c in df.columns if c != target_col]
+    y, n_bins = bin_target(df, target_col)
+    X = df[desc_cols].to_numpy()
+    clf = DecisionTreeClassifier(criterion="gini", random_state=0).fit(X, y)
+    t, C = clf.tree_, clf.classes_
+    n = t.node_count
+    cl, cr, feat, thr = t.children_left, t.children_right, t.feature, t.threshold
+    is_leaf = cl == -1
+    parent = np.full(n, -1, int); depth = np.zeros(n, int); st = [(0, 0)]
+    while st:
+        v, d = st.pop(); depth[v] = d
+        if not is_leaf[v]:
+            parent[cl[v]] = parent[cr[v]] = v
+            st += [(cl[v], d + 1), (cr[v], d + 1)]
+    leaves = [v for v in range(n) if is_leaf[v]]
+    leaf_of_row = clf.apply(X)
+    rows_of_leaf = {}
+    for i, lf in enumerate(leaf_of_row):
+        rows_of_leaf.setdefault(int(lf), []).append(i)
+    node_cnt = {v: {} for v in range(n)}
+    for lf in leaves:
+        c = {}
+        for i in rows_of_leaf.get(lf, []):
+            b = int(y[i]); c[b] = c.get(b, 0) + 1
+        node_cnt[lf] = c
+    for v in sorted(range(n), key=lambda v: -depth[v]):
+        if not is_leaf[v]:
+            m = {}
+            for ch in (cl[v], cr[v]):
+                for b, k in node_cnt[ch].items():
+                    m[b] = m.get(b, 0) + k
+            node_cnt[v] = m
+    leaf_bin = {v: max(node_cnt[v], key=node_cnt[v].get) for v in leaves}
+
+    def path_predicate(v):
+        preds, cur = [], v
+        while parent[cur] != -1:
+            p = parent[cur]
+            op = "<=" if cl[p] == cur else ">"
+            preds.append((desc_cols[feat[p]], op, float(thr[p]))); cur = p
+        return list(reversed(preds))
+
+    return dict(clf=clf, desc_cols=desc_cols, n_bins=n_bins, n=n, is_leaf=is_leaf,
+                cl=cl, cr=cr, parent=parent, depth=depth, node_cnt=node_cnt,
+                leaves=leaves, leaf_bin=leaf_bin, rows_of_leaf=rows_of_leaf,
+                path_predicate=path_predicate)
+
+
+def leaves_under(ix, v):
+    out, st = [], [v]
+    while st:
+        u = st.pop()
+        (out.append(u) if ix["is_leaf"][u] else st.extend([ix["cl"][u], ix["cr"][u]]))
+    return out
+
+
+def select_subtrees(ix, target, total, cap_slack=0.02):
+    bins = sorted(ix["node_cnt"][0])
+    tc = {b: target.get(b, 0) * total for b in bins}
+    cap = {b: tc[b] * (1 + cap_slack) for b in bins}
+    selected, got = set(), {b: 0.0 for b in bins}
+    internal = [v for v in range(ix["n"]) if not ix["is_leaf"][v]]
+    tot = lambda v: sum(ix["node_cnt"][v].values())
+    for v in sorted(internal, key=lambda v: (ix["depth"][v], -tot(v))):
+        lu = leaves_under(ix, v)
+        if any(l in selected for l in lu):
+            continue
+        c = ix["node_cnt"][v]
+        if all(got[b] + c.get(b, 0) <= cap[b] + 1e-9 for b in bins):
+            selected.update(lu)
+            for b, k in c.items():
+                got[b] += k
+    for lf in sorted(ix["leaves"], key=lambda l: -ix["node_cnt"][l].get(ix["leaf_bin"][l], 0)):
+        if lf in selected:
+            continue
+        b = ix["leaf_bin"][lf]; k = ix["node_cnt"][lf].get(b, 0)
+        if got[b] + k <= cap[b] + 1e-9 and got[b] < tc[b] - 1e-9:
+            selected.add(lf); got[b] += k
+    labels = {lf: int(lf in selected) for lf in ix["leaves"]}
+    return labels, got, tc
+
+
+def tv_distance(got, tc):
+    gs, ts = sum(got.values()), sum(tc.values())
+    if gs == 0 or ts == 0:
+        return 1.0
+    bins = set(got) | set(tc)
+    return 0.5 * sum(abs(got.get(b, 0) / gs - tc.get(b, 0) / ts) for b in bins)
+
+
+def reduce_labeling(ix, labels):
+    n, parent = ix["n"], ix["parent"]
+    lab = np.full(n, -1, int)
+    for v in sorted(range(n), key=lambda v: -ix["depth"][v]):
+        if ix["is_leaf"][v]:
+            lab[v] = labels[v]
+        else:
+            a, b = lab[ix["cl"][v]], lab[ix["cr"][v]]
+            lab[v] = a if (a == b and a != -1) else -1
+    A = [v for v in range(n) if lab[v] == 1 and (parent[v] == -1 or lab[parent[v]] != 1)]
+    reduced = [v for v in range(n) if parent[v] == -1 or lab[parent[v]] == -1]
+    dnf = [ix["path_predicate"](v) for v in A]
+    return dict(node_label=lab, antichain=A, dnf=dnf,
+                reduced_size=len(reduced), n_terms=len(A))
+
+
+def selected_rows(ix, labels):
+    rows = []
+    for lf, l in labels.items():
+        if l:
+            rows += ix["rows_of_leaf"].get(lf, [])
+    return rows
+
+
+def dnf_to_str(dnf, max_terms=12):
+    terms = dnf[:max_terms]
+    lines = []
+    for term in terms:
+        lines.append("(" + " AND ".join(f"{f} {op} {t:.3f}" for f, op, t in term) + ")"
+                     if term else "(TRUE)")
+    out = "\n  OR ".join(lines)
+    if len(dnf) > max_terms:
+        out += f"\n  ... (+{len(dnf) - max_terms} more terms)"
+    return out
+
+
+# ----------------------------------------------------------------------------
+# Default dataset (swap in your own df + target_col at the bottom)
+# ----------------------------------------------------------------------------
+def default_dataset(N=1000000, C=25, seed=42):
+    rng = np.random.default_rng(seed)
+    centers = rng.uniform(0, 1, size=(4, 3))
+    assign = rng.integers(0, 4, size=N)
+    coords = centers[assign] + rng.normal(0, 0.12, size=(N, C))
+    df = pd.DataFrame(coords, columns=[f"x{i}" for i in range(C)])
+    df["target"] = rng.random(N)
+    cond = assign == 0
+    df.loc[cond, "target"] = rng.normal(0.5, 0.15, size=int(cond.sum()))
+    return df, "target"
+
+
+# ----------------------------------------------------------------------------
+# Distribution component specs (label -> default) per family
+# ----------------------------------------------------------------------------
+DIST_PARAMS = {
+    "gaussian":    [("loc", "0.5"),  ("scale", "0.15")],
+    "exponential": [("loc", "0.0"),  ("scale", "0.20")],
+    "uniform":     [("loc", "0.0"),  ("scale", "1.00")],
+    "beta":        [("a",   "2.0"),  ("b",     "2.0")],
+}
+
+
+class QueryUI:
+    def __init__(self, root, df, target_col):
+        self.df, self.target_col = df, target_col
+        self.N = len(df)
+        self.bin_ids, self.n_bins = bin_target(df, target_col)
+        self.centers = _bin_centers(df, target_col, self.n_bins)
+        self.avail = {b: int((self.bin_ids == b).sum()) for b in range(self.n_bins)}
+        self.tmin = float(df[target_col].min()); self.tmax = float(df[target_col].max())
+        self.components = []                       # list of (name, params_dict, weight)
+
+        root.title("quaero — distributional query builder")
+        self._build(root)
+        root.after(50, self._build_index_async)   # build index just after UI shows
+
+    # ---- index (built once) ----
+    def _build_index_async(self):
+        self.status.set("Building tree index …")
+        self.root.update_idletasks()
+        self.ix = build_index(self.df, self.target_col)
+        self.status.set(f"Index ready: {len(self.ix['leaves'])} leaves, "
+                        f"{self.ix['n_bins']} bins, N={self.N}")
+        self._refresh()
+
+    # ---- layout ----
+    def _build(self, root):
+        self.root = root
+        left = ttk.Frame(root, padding=8);  left.grid(row=0, column=0, sticky="ns")
+        right = ttk.Frame(root, padding=8); right.grid(row=0, column=1, sticky="nsew")
+        root.columnconfigure(1, weight=1); root.rowconfigure(0, weight=1)
+
+        # component builder
+        ttk.Label(left, text="Add distribution component", font=("", 10, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w")
+        self.kind = tk.StringVar(value="gaussian")
+        cb = ttk.Combobox(left, textvariable=self.kind, values=list(DIST_PARAMS),
+                          state="readonly", width=14)
+        cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=2)
+        cb.bind("<<ComboboxSelected>>", lambda e: self._sync_param_labels())
+
+        self.p1lab = ttk.Label(left, text="loc"); self.p1lab.grid(row=2, column=0, sticky="w")
+        self.p1 = ttk.Entry(left, width=10); self.p1.grid(row=2, column=1, sticky="w")
+        self.p2lab = ttk.Label(left, text="scale"); self.p2lab.grid(row=3, column=0, sticky="w")
+        self.p2 = ttk.Entry(left, width=10); self.p2.grid(row=3, column=1, sticky="w")
+        ttk.Label(left, text="weight").grid(row=4, column=0, sticky="w")
+        self.wt = ttk.Entry(left, width=10); self.wt.grid(row=4, column=1, sticky="w")
+        self.wt.insert(0, "1.0")
+        self._sync_param_labels()
+
+        ttk.Button(left, text="Add component", command=self._add).grid(
+            row=5, column=0, pady=4, sticky="w")
+        ttk.Button(left, text="Clear all", command=self._clear).grid(
+            row=5, column=1, pady=4, sticky="w")
+
+        ttk.Label(left, text="Mixture components").grid(row=6, column=0, columnspan=2, sticky="w")
+        self.comp_list = tk.Listbox(left, height=6, width=32)
+        self.comp_list.grid(row=7, column=0, columnspan=2, sticky="we")
+
+        # cardinality + feasibility
+        ttk.Separator(left, orient="horizontal").grid(row=8, column=0, columnspan=2,
+                                                       sticky="we", pady=6)
+        ttk.Label(left, text="Cardinality (% of rows)").grid(row=9, column=0, columnspan=2, sticky="w")
+        self.pct = tk.DoubleVar(value=30.0)
+        sc = ttk.Scale(left, from_=1, to=100, variable=self.pct, command=lambda e: self._refresh())
+        sc.grid(row=10, column=0, columnspan=2, sticky="we")
+        self.pct_lab = ttk.Label(left, text="30%"); self.pct_lab.grid(row=11, column=0, sticky="w")
+        self.feas = ttk.Label(left, text="", font=("", 9, "bold")); self.feas.grid(
+            row=11, column=1, sticky="w")
+
+        ttk.Button(left, text="Process query", command=self._process).grid(
+            row=12, column=0, columnspan=2, pady=8, sticky="we")
+
+        self.status = tk.StringVar(value="starting …")
+        ttk.Label(left, textvariable=self.status, foreground="#555",
+                  wraplength=240).grid(row=13, column=0, columnspan=2, sticky="w")
+
+        # right: figures + rule text
+        self.fig = Figure(figsize=(6.5, 5.2), dpi=100)
+        self.ax_pdf = self.fig.add_subplot(211)
+        self.ax_hist = self.fig.add_subplot(212)
+        self.fig.tight_layout(pad=2.0)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=right)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        ttk.Label(right, text="Induced rule (DNF over descriptors)").pack(anchor="w")
+        self.rule = scrolledtext.ScrolledText(right, height=8, width=80, wrap="word")
+        self.rule.pack(fill="both", expand=False)
+
+    # ---- component helpers ----
+    def _sync_param_labels(self):
+        (l1, d1), (l2, d2) = DIST_PARAMS[self.kind.get()]
+        self.p1lab.config(text=l1); self.p2lab.config(text=l2)
+        for e, d in ((self.p1, d1), (self.p2, d2)):
+            e.delete(0, "end"); e.insert(0, d)
+
+    def _add(self):
+        try:
+            (l1, _), (l2, _) = DIST_PARAMS[self.kind.get()]
+            params = {l1: float(self.p1.get()), l2: float(self.p2.get())}
+            w = float(self.wt.get())
+        except ValueError:
+            self.status.set("Invalid number in a parameter/weight field."); return
+        self.components.append((self.kind.get(), params, w))
+        ps = ", ".join(f"{k}={v}" for k, v in params.items())
+        self.comp_list.insert("end", f"{self.kind.get()}({ps})  w={w}")
+        self._refresh()
+
+    def _clear(self):
+        self.components.clear(); self.comp_list.delete(0, "end")
+        self.rule.delete("1.0", "end"); self.ax_hist.clear(); self.canvas.draw()
+        self._refresh()
+
+    # ---- target distribution over bins from the current mixture ----
+    def _target_props(self):
+        if not self.components:
+            return None
+        pdf = make_pdf([(n, p, w) for n, p, w in self.components])
+        vals = np.array([max(pdf(c), 0.0) for c in self.centers], dtype=float)
+        s = vals.sum()
+        return (vals / s) if s > 0 else None
+
+    # ---- redraw pdf preview + feasibility ----
+    def _refresh(self, *_):
+        self.pct_lab.config(text=f"{self.pct.get():.0f}%")
+        # pdf preview
+        self.ax_pdf.clear()
+        if self.components:
+            pdf = make_pdf([(n, p, w) for n, p, w in self.components])
+            xs = np.linspace(self.tmin, self.tmax, 400)
+            ys = [pdf(x) for x in xs]
+            self.ax_pdf.plot(xs, ys, color="navy")
+            self.ax_pdf.fill_between(xs, ys, color="navy", alpha=0.15)
+            self.ax_pdf.set_title("Specified target pdf")
+        else:
+            self.ax_pdf.set_title("Specified target pdf — add a component")
+        self.ax_pdf.set_xlabel(self.target_col); self.ax_pdf.set_yticks([])
+        self.fig.tight_layout(pad=2.0); self.canvas.draw()
+        self._feasibility()
+
+    def _feasibility(self):
+        p = self._target_props()
+        if p is None:
+            self.feas.config(text="—", foreground="#555"); return
+        total = self.pct.get() / 100.0 * self.N
+        need = {b: total * p[b] for b in range(self.n_bins)}
+        bad = [(b, need[b], self.avail[b]) for b in range(self.n_bins)
+               if need[b] > self.avail[b] + 1e-9]
+        limits = [self.avail[b] / p[b] for b in range(self.n_bins) if p[b] > 0]
+        max_pct = 100.0 * min(limits) / self.N if limits else 0.0
+        if bad:
+            b, nd, av = max(bad, key=lambda t: t[1] - t[2])
+            self.feas.config(text=f"INFEASIBLE (bin {b}: need {nd:.0f} > {av})   "
+                                  f"max ≈ {max_pct:.0f}%", foreground="#c62828")
+        else:
+            self.feas.config(text=f"feasible   (max ≈ {max_pct:.0f}%)", foreground="#2e7d32")
+
+    # ---- run the query ----
+    def _process(self):
+        if not hasattr(self, "ix"):
+            self.status.set("Index still building — try again in a moment."); return
+        p = self._target_props()
+        if p is None:
+            self.status.set("Add at least one distribution component first."); return
+        target = {b: float(p[b]) for b in range(self.n_bins)}
+        total = round(self.pct.get() / 100.0 * self.N)
+        labels, got, tc = select_subtrees(self.ix, target, total=total)
+        red = reduce_labeling(self.ix, labels)
+
+        # result histogram (selected vs full + specified pdf)
+        rows = selected_rows(self.ix, labels)
+        sel = self.df[self.target_col].to_numpy()[rows]
+        full = self.df[self.target_col].to_numpy()
+        pdf = make_pdf([(n, pp, w) for n, pp, w in self.components])
+        self.ax_hist.clear()
+        self.ax_hist.hist(full, bins=self.n_bins, density=True, alpha=0.35,
+                          color="steelblue", label="full dataset")
+        if len(sel):
+            self.ax_hist.hist(sel, bins=self.n_bins, density=True, alpha=0.75,
+                              color="tomato", label=f"selected (n={len(sel)})")
+        xs = np.linspace(self.tmin, self.tmax, 400)
+        self.ax_hist.plot(xs, [pdf(x) for x in xs], "k--", lw=1.3, label="specified pdf")
+        self.ax_hist.set_title(f"Result — TV={tv_distance(got, tc):.3f}, "
+                               f"{red['n_terms']} rule terms")
+        self.ax_hist.set_xlabel(self.target_col); self.ax_hist.set_yticks([])
+        self.ax_hist.legend(fontsize=7)
+        self.fig.tight_layout(pad=2.0); self.canvas.draw()
+
+        # rule + stats
+        self.rule.delete("1.0", "end")
+        self.rule.insert("end",
+            f"selected rows: {len(sel)} / {self.N}   TV: {tv_distance(got, tc):.4f}   "
+            f"DNF terms: {red['n_terms']}   reduced size: {red['reduced_size']}\n\n")
+        self.rule.insert("end", dnf_to_str(red["dnf"], max_terms=12))
+        self.status.set("Query processed.")
+
+
+if __name__ == "__main__":
+    df, target_col = default_dataset()      # swap in your own DataFrame + target column here
+    root = tk.Tk()
+    QueryUI(root, df, target_col)
+    root.mainloop()
