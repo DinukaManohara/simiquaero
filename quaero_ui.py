@@ -111,7 +111,10 @@ def leaves_under(ix, v):
     return out
 
 
-def select_subtrees(ix, target, total, cap_slack=0.02):
+def select_subtrees(ix, target, total, excluded=None, cap_slack=0.02):
+    """Select leaves matching `target` at cardinality `total`, ignoring any leaf
+    in `excluded` (already used by an earlier subset)."""
+    excluded = excluded or set()
     bins = sorted(ix["node_cnt"][0])
     tc = {b: target.get(b, 0) * total for b in bins}
     cap = {b: tc[b] * (1 + cap_slack) for b in bins}
@@ -120,7 +123,7 @@ def select_subtrees(ix, target, total, cap_slack=0.02):
     tot = lambda v: sum(ix["node_cnt"][v].values())
     for v in sorted(internal, key=lambda v: (ix["depth"][v], -tot(v))):
         lu = leaves_under(ix, v)
-        if any(l in selected for l in lu):
+        if any(l in selected or l in excluded for l in lu):   # subtree must be fully available
             continue
         c = ix["node_cnt"][v]
         if all(got[b] + c.get(b, 0) <= cap[b] + 1e-9 for b in bins):
@@ -128,7 +131,7 @@ def select_subtrees(ix, target, total, cap_slack=0.02):
             for b, k in c.items():
                 got[b] += k
     for lf in sorted(ix["leaves"], key=lambda l: -ix["node_cnt"][l].get(ix["leaf_bin"][l], 0)):
-        if lf in selected:
+        if lf in selected or lf in excluded:
             continue
         b = ix["leaf_bin"][lf]; k = ix["node_cnt"][lf].get(b, 0)
         if got[b] + k <= cap[b] + 1e-9 and got[b] < tc[b] - 1e-9:
@@ -167,6 +170,29 @@ def selected_rows(ix, labels):
         if l:
             rows += ix["rows_of_leaf"].get(lf, [])
     return rows
+
+
+def find_multiple_subsets(ix, target, total, tvd_threshold, max_subsets=50):
+    """Extract disjoint subsets that each match `target` at cardinality `total`.
+
+    Find the first subset (+ its rule), exclude its leaves, find the next from the
+    remaining leaves, and so on -- stopping once the best achievable subset exceeds
+    `tvd_threshold` (or nothing more can be selected).  Returns a list of dicts with
+    labels, got, tc, tvd, red (rule), and rows.
+    """
+    excluded, results = set(), []
+    while len(results) < max_subsets:
+        labels, got, tc = select_subtrees(ix, target, total, excluded=excluded)
+        if sum(labels.values()) == 0:
+            break
+        tvd = tv_distance(got, tc)
+        if tvd > tvd_threshold:
+            break
+        red = reduce_labeling(ix, labels)
+        results.append(dict(labels=labels, got=got, tc=tc, tvd=tvd, red=red,
+                            rows=selected_rows(ix, labels)))
+        excluded |= {lf for lf, l in labels.items() if l}
+    return results
 
 
 def dnf_to_str(dnf, max_terms=12):
@@ -275,12 +301,23 @@ class QueryUI:
         self.feas = ttk.Label(left, text="", font=("", 9, "bold")); self.feas.grid(
             row=11, column=1, sticky="w")
 
+        ttk.Label(left, text="Max TVD threshold").grid(row=12, column=0, sticky="w")
+        self.tvd_thr = ttk.Entry(left, width=10); self.tvd_thr.grid(row=12, column=1, sticky="w")
+        self.tvd_thr.insert(0, "0.10")
+
         ttk.Button(left, text="Process query", command=self._process).grid(
-            row=12, column=0, columnspan=2, pady=8, sticky="we")
+            row=13, column=0, columnspan=2, pady=8, sticky="we")
+
+        ttk.Label(left, text="Subsets found (select to view)").grid(
+            row=14, column=0, columnspan=2, sticky="w")
+        self.subset_list = tk.Listbox(left, height=6, width=32)
+        self.subset_list.grid(row=15, column=0, columnspan=2, sticky="we")
+        self.subset_list.bind("<<ListboxSelect>>", self._on_subset_select)
+        self.subsets = []
 
         self.status = tk.StringVar(value="starting …")
         ttk.Label(left, textvariable=self.status, foreground="#555",
-                  wraplength=240).grid(row=13, column=0, columnspan=2, sticky="w")
+                  wraplength=240).grid(row=16, column=0, columnspan=2, sticky="w")
 
         # right: figures + rule text
         self.fig = Figure(figsize=(6.5, 5.2), dpi=100)
@@ -361,44 +398,70 @@ class QueryUI:
         else:
             self.feas.config(text=f"feasible   (max ≈ {max_pct:.0f}%)", foreground="#2e7d32")
 
-    # ---- run the query ----
+    # ---- run the query: find MULTIPLE disjoint subsets ----
     def _process(self):
         if not hasattr(self, "ix"):
             self.status.set("Index still building — try again in a moment."); return
         p = self._target_props()
         if p is None:
             self.status.set("Add at least one distribution component first."); return
+        try:
+            thr = float(self.tvd_thr.get())
+        except ValueError:
+            self.status.set("Invalid TVD threshold."); return
         target = {b: float(p[b]) for b in range(self.n_bins)}
         total = round(self.pct.get() / 100.0 * self.N)
-        labels, got, tc = select_subtrees(self.ix, target, total=total)
-        red = reduce_labeling(self.ix, labels)
 
-        # result histogram (selected vs full + specified pdf)
-        rows = selected_rows(self.ix, labels)
-        sel = self.df[self.target_col].to_numpy()[rows]
+        self.status.set("Searching for subsets …"); self.root.update_idletasks()
+        self.subsets = find_multiple_subsets(self.ix, target, total, thr)
+
+        self.subset_list.delete(0, "end")
+        for i, s in enumerate(self.subsets):
+            self.subset_list.insert(
+                "end", f"#{i + 1}: {len(s['rows'])} rows, TVD={s['tvd']:.3f}, "
+                       f"{s['red']['n_terms']} terms")
+        if self.subsets:
+            self.subset_list.selection_clear(0, "end")
+            self.subset_list.selection_set(0)
+            self._show_subset(0)
+            self.status.set(f"Found {len(self.subsets)} disjoint subset(s) under TVD {thr:.3f}.")
+        else:
+            self.ax_hist.clear(); self.canvas.draw()
+            self.rule.delete("1.0", "end")
+            self.status.set(f"No subset achievable under TVD {thr:.3f}.")
+
+    def _on_subset_select(self, event):
+        sel = self.subset_list.curselection()
+        if sel:
+            self._show_subset(sel[0])
+
+    def _show_subset(self, i):
+        """Draw the histogram and rule for the i-th found subset."""
+        s = self.subsets[i]
+        got, tc, red = s["got"], s["tc"], s["red"]
+        sel = self.df[self.target_col].to_numpy()[s["rows"]]
         full = self.df[self.target_col].to_numpy()
         pdf = make_pdf([(n, pp, w) for n, pp, w in self.components])
+
         self.ax_hist.clear()
         self.ax_hist.hist(full, bins=self.n_bins, density=True, alpha=0.35,
                           color="steelblue", label="full dataset")
         if len(sel):
             self.ax_hist.hist(sel, bins=self.n_bins, density=True, alpha=0.75,
-                              color="tomato", label=f"selected (n={len(sel)})")
+                              color="tomato", label=f"subset #{i + 1} (n={len(sel)})")
         xs = np.linspace(self.tmin, self.tmax, 400)
         self.ax_hist.plot(xs, [pdf(x) for x in xs], "k--", lw=1.3, label="specified pdf")
-        self.ax_hist.set_title(f"Result — TV={tv_distance(got, tc):.3f}, "
+        self.ax_hist.set_title(f"Subset #{i + 1} — TVD={s['tvd']:.3f}, "
                                f"{red['n_terms']} rule terms")
         self.ax_hist.set_xlabel(self.target_col); self.ax_hist.set_yticks([])
         self.ax_hist.legend(fontsize=7)
         self.fig.tight_layout(pad=2.0); self.canvas.draw()
 
-        # rule + stats
         self.rule.delete("1.0", "end")
         self.rule.insert("end",
-            f"selected rows: {len(sel)} / {self.N}   TV: {tv_distance(got, tc):.4f}   "
+            f"subset #{i + 1}   rows: {len(sel)} / {self.N}   TVD: {s['tvd']:.4f}   "
             f"DNF terms: {red['n_terms']}   reduced size: {red['reduced_size']}\n\n")
         self.rule.insert("end", dnf_to_str(red["dnf"], max_terms=12))
-        self.status.set("Query processed.")
 
 
 if __name__ == "__main__":
