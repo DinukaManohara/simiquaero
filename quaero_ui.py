@@ -207,6 +207,69 @@ def dnf_to_str(dnf, max_terms=12):
     return out
 
 
+def _leaf_intervals(ix):
+    """Contiguous [lo, hi] leaf-index interval per node (left-to-right DFS
+    numbering).  Two nodes' subtrees are disjoint iff their intervals don't
+    overlap -- an O(1) disjointness test for the box search."""
+    cl, cr, is_leaf = ix["cl"], ix["cr"], ix["is_leaf"]
+    leaf_index, order, st = {}, [0], [0]
+    while st:                                   # pre-order DFS, left before right
+        v = st.pop()
+        if is_leaf[v]:
+            leaf_index[v] = order[0]; order[0] += 1
+        else:
+            st.append(cr[v]); st.append(cl[v])
+    lo, hi = {}, {}
+    for v in sorted(range(ix["n"]), key=lambda v: -ix["depth"][v]):   # children first
+        if is_leaf[v]:
+            lo[v] = hi[v] = leaf_index[v]
+        else:
+            lo[v] = min(lo[cl[v]], lo[cr[v]]); hi[v] = max(hi[cl[v]], hi[cr[v]])
+    return lo, hi
+
+
+def find_best_boxes(ix, target, n_boxes, beam=16):
+    """Query by NUMBER OF BOXES: find `n_boxes` disjoint subtrees (bounding boxes,
+    one DNF conjunct each) whose union's bin distribution is CLOSEST (min TVD) to
+    `target` proportions.  Beam search over disjoint node combinations.
+
+    Unlike the cardinality query, there is no size target -- the objective is the
+    distributional match of exactly n_boxes boxes in disjunction.
+    """
+    lo, hi = _leaf_intervals(ix)
+    nodes = [v for v in range(ix["n"]) if sum(ix["node_cnt"][v].values()) > 0]
+    states = [(1.0, (), [], {})]                # (tvd, chosen, occupied intervals, got)
+    for _ in range(n_boxes):
+        cand = {}
+        for _tvd, chosen, occ, got in states:
+            for v in nodes:
+                if v in chosen:
+                    continue
+                a, b = lo[v], hi[v]
+                if any(not (b < c or d < a) for (c, d) in occ):   # overlaps a chosen box
+                    continue
+                g2 = dict(got)
+                for bb, k in ix["node_cnt"][v].items():
+                    g2[bb] = g2.get(bb, 0) + k
+                key = frozenset(chosen + (v,))
+                t = tv_distance(g2, target)
+                if key not in cand or t < cand[key][0]:
+                    cand[key] = (t, chosen + (v,), occ + [(a, b)], g2)
+        if not cand:
+            break
+        states = sorted(cand.values(), key=lambda s: s[0])[:beam]
+    tvd, chosen, occ, got = states[0]
+    labels = {lf: 0 for lf in ix["leaves"]}
+    for v in chosen:
+        for lf in leaves_under(ix, v):
+            labels[lf] = 1
+    dnf = [ix["path_predicate"](v) for v in chosen]
+    red = dict(dnf=dnf, n_terms=len(chosen), antichain=list(chosen),
+               reduced_size=len(chosen), node_label=None)
+    return dict(labels=labels, got=got, tc=dict(target), tvd=tvd, red=red,
+                n_boxes=len(chosen))
+
+
 # ----------------------------------------------------------------------------
 # Default dataset (swap in your own df + target_col at the bottom)
 # ----------------------------------------------------------------------------
@@ -305,19 +368,26 @@ class QueryUI:
         self.tvd_thr = ttk.Entry(left, width=10); self.tvd_thr.grid(row=12, column=1, sticky="w")
         self.tvd_thr.insert(0, "0.10")
 
-        ttk.Button(left, text="Process query", command=self._process).grid(
-            row=13, column=0, columnspan=2, pady=8, sticky="we")
+        ttk.Label(left, text="# bounding boxes").grid(row=13, column=0, sticky="w")
+        self.n_boxes = tk.IntVar(value=2)
+        ttk.Spinbox(left, from_=1, to=10, textvariable=self.n_boxes, width=8).grid(
+            row=13, column=1, sticky="w")
 
-        ttk.Label(left, text="Subsets found (select to view)").grid(
-            row=14, column=0, columnspan=2, sticky="w")
+        ttk.Button(left, text="Query by cardinality (subsets)", command=self._process).grid(
+            row=14, column=0, columnspan=2, pady=(8, 2), sticky="we")
+        ttk.Button(left, text="Query by # boxes (best match)", command=self._process_boxes).grid(
+            row=15, column=0, columnspan=2, pady=(0, 8), sticky="we")
+
+        ttk.Label(left, text="Results (select to view)").grid(
+            row=16, column=0, columnspan=2, sticky="w")
         self.subset_list = tk.Listbox(left, height=6, width=32)
-        self.subset_list.grid(row=15, column=0, columnspan=2, sticky="we")
+        self.subset_list.grid(row=17, column=0, columnspan=2, sticky="we")
         self.subset_list.bind("<<ListboxSelect>>", self._on_subset_select)
         self.subsets = []
 
         self.status = tk.StringVar(value="starting …")
         ttk.Label(left, textvariable=self.status, foreground="#555",
-                  wraplength=240).grid(row=16, column=0, columnspan=2, sticky="w")
+                  wraplength=240).grid(row=18, column=0, columnspan=2, sticky="w")
 
         # right: figures + rule text
         self.fig = Figure(figsize=(6.5, 5.2), dpi=100)
@@ -429,6 +499,26 @@ class QueryUI:
             self.ax_hist.clear(); self.canvas.draw()
             self.rule.delete("1.0", "end")
             self.status.set(f"No subset achievable under TVD {thr:.3f}.")
+
+    # ---- run the query: best N bounding boxes (by count, min-TVD match) ----
+    def _process_boxes(self):
+        if not hasattr(self, "ix"):
+            self.status.set("Index still building — try again in a moment."); return
+        p = self._target_props()
+        if p is None:
+            self.status.set("Add at least one distribution component first."); return
+        target = {b: float(p[b]) for b in range(self.n_bins)}
+        k = int(self.n_boxes.get())
+        self.status.set(f"Searching best {k} box(es) …"); self.root.update_idletasks()
+        res = find_best_boxes(self.ix, target, k)
+        res["rows"] = selected_rows(self.ix, res["labels"])
+        self.subsets = [res]
+        self.subset_list.delete(0, "end")
+        self.subset_list.insert(
+            "end", f"{res['n_boxes']} box(es): {len(res['rows'])} rows, TVD={res['tvd']:.3f}")
+        self.subset_list.selection_clear(0, "end"); self.subset_list.selection_set(0)
+        self._show_subset(0)
+        self.status.set(f"Best {res['n_boxes']} box(es): TVD={res['tvd']:.3f}.")
 
     def _on_subset_select(self, event):
         sel = self.subset_list.curselection()
