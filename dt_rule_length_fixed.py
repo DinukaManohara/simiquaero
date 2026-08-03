@@ -18,16 +18,14 @@ import time
 from bench_common import (make_dataset, build_index, gaussian_target,
                           find_best_boxes, append_csv)
 
-N_BINS = 8        # fixed number of target bins (the queried distribution's support)
-
 
 def run(n_rows, n_cols, n_boxes, seed, warmup, repeats):
     df, target_col = make_dataset(n_rows, n_cols, seed=seed)
-    n_bins = N_BINS
 
     t0 = time.perf_counter()
-    ix = build_index(df, target_col, n_bins=n_bins)          # Stage 1 (once per dataset)
+    ix = build_index(df, target_col)                         # Stage 1; n_bins via Scott's rule
     build_sec = time.perf_counter() - t0
+    n_bins = ix["n_bins"]
 
     target = gaussian_target(df, target_col, n_bins)
 

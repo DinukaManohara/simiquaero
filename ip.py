@@ -17,20 +17,17 @@ needs one column.
 import argparse
 import time
 import numpy as np
-import pandas as pd
 from scipy import sparse
 from scipy.optimize import milp, LinearConstraint, Bounds
 
-from bench_common import make_dataset, append_csv
+from bench_common import make_dataset, bin_target, append_csv
 
 N_COLS = 3        # 2 descriptors + 1 target (fixed; only one sort column needed)
 
 
 def solve_islands_ip(df, target_col, sort_col, n_bins, frac, time_limit,
                      warmup, repeats):
-    tgt = df[target_col].to_numpy()
-    bin_id = np.asarray(pd.cut(tgt, bins=n_bins, labels=range(n_bins),
-                               include_lowest=True).astype(int))
+    bin_id, n_bins = bin_target(df, target_col, n_bins)   # n_bins=None -> Scott's rule
     order = np.argsort(df[sort_col].to_numpy(), kind="mergesort")   # sort by one column
     bin_sorted = bin_id[order]                                      # bin per sorted position
     n = len(order)
@@ -88,7 +85,8 @@ def solve_islands_ip(df, target_col, sort_col, n_bins, frac, time_limit,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("n_rows", type=int, help="number of rows (dataset size)")
-    ap.add_argument("--bins", type=int, default=4)
+    ap.add_argument("--bins", type=int, default=None,
+                    help="target bins (default: Scott's rule)")
     ap.add_argument("--frac", type=float, default=0.5, help="fraction of each bin to select")
     ap.add_argument("--sort-col", default="f1", help="column to sort by (independent of target)")
     ap.add_argument("--time-limit", type=float, default=None, help="solver time limit (s)")
