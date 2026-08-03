@@ -8,6 +8,7 @@ Backend: the quaero_tree pipeline (decision-tree index -> subtree-first selectio
 -> lossless reduction to a DNF rule), embedded below so the app is standalone.
 """
 import math
+from datetime import datetime
 import numpy as np
 import pandas as pd
 from scipy import stats as scipy_stats
@@ -389,16 +390,29 @@ class QueryUI:
         ttk.Label(left, textvariable=self.status, foreground="#555",
                   wraplength=240).grid(row=18, column=0, columnspan=2, sticky="w")
 
-        # right: figures + rule text
-        self.fig = Figure(figsize=(6.5, 5.2), dpi=100)
+        # right: figures (top) + rule text (bottom).  Grid with row weights so the
+        # rule area claims more room than before, at the expense of the plots.
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(0, weight=2)          # figures  (was the whole panel)
+        right.rowconfigure(2, weight=3)          # rule     (now the larger share)
+
+        self.fig = Figure(figsize=(6.5, 3.6), dpi=100)
         self.ax_pdf = self.fig.add_subplot(211)
         self.ax_hist = self.fig.add_subplot(212)
         self.fig.tight_layout(pad=2.0)
         self.canvas = FigureCanvasTkAgg(self.fig, master=right)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
-        ttk.Label(right, text="Induced rule (DNF over descriptors)").pack(anchor="w")
-        self.rule = scrolledtext.ScrolledText(right, height=8, width=80, wrap="word")
-        self.rule.pack(fill="both", expand=False)
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+        # rule header: label on the left, a very small capture button on the right
+        hdr = ttk.Frame(right); hdr.grid(row=1, column=0, sticky="we", pady=(4, 0))
+        hdr.columnconfigure(0, weight=1)
+        ttk.Label(hdr, text="Induced rule (DNF over descriptors)").grid(
+            row=0, column=0, sticky="w")
+        self.cap_btn = ttk.Button(hdr, text="⤓", width=2, command=self._capture)
+        self.cap_btn.grid(row=0, column=1, sticky="e")
+
+        self.rule = scrolledtext.ScrolledText(right, height=16, width=80, wrap="word")
+        self.rule.grid(row=2, column=0, sticky="nsew")
 
     # ---- component helpers ----
     def _sync_param_labels(self):
@@ -551,7 +565,25 @@ class QueryUI:
         self.rule.insert("end",
             f"subset #{i + 1}   rows: {len(sel)} / {self.N}   TVD: {s['tvd']:.4f}   "
             f"DNF terms: {red['n_terms']}   reduced size: {red['reduced_size']}\n\n")
-        self.rule.insert("end", dnf_to_str(red["dnf"], max_terms=12))
+        self.rule.insert("end", dnf_to_str(red["dnf"], max_terms=20))
+
+    # ---- capture the whole window to a high-quality PNG ----
+    def _capture(self, *_):
+        self.root.update_idletasks()
+        fname = f"quaero_capture_{datetime.now():%Y%m%d_%H%M%S}.png"
+        try:
+            from PIL import ImageGrab
+            x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
+            w, h = self.root.winfo_width(), self.root.winfo_height()
+            ImageGrab.grab(bbox=(x, y, x + w, y + h)).save(fname, "PNG")
+            self.status.set(f"Saved window capture → {fname}")
+        except Exception as e:
+            # fallback if PIL/ImageGrab is unavailable: high-res save of the figure
+            try:
+                self.fig.savefig(fname, dpi=300, bbox_inches="tight")
+                self.status.set(f"Window grab unavailable ({e}); saved figure @300dpi → {fname}")
+            except Exception as e2:
+                self.status.set(f"Capture failed: {e2}")
 
 
 if __name__ == "__main__":

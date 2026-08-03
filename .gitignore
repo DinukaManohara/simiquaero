@@ -10,3 +10,5 @@ __pycache__/
 # Editor lock/autosave files
 \#*\#
 .\#*
+# UI window captures
+quaero_capture_*.png
