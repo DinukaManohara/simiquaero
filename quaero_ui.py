@@ -567,23 +567,23 @@ class QueryUI:
             f"DNF terms: {red['n_terms']}   reduced size: {red['reduced_size']}\n\n")
         self.rule.insert("end", dnf_to_str(red["dnf"], max_terms=20))
 
-    # ---- capture the whole window to a high-quality PNG ----
+    # ---- capture the WHOLE Tk window to a high-quality PDF ----
     def _capture(self, *_):
         self.root.update_idletasks()
-        fname = f"quaero_capture_{datetime.now():%Y%m%d_%H%M%S}.png"
+        fname = f"quaero_capture_{datetime.now():%Y%m%d_%H%M%S}.pdf"
         try:
             from PIL import ImageGrab
-            x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
-            w, h = self.root.winfo_width(), self.root.winfo_height()
-            ImageGrab.grab(bbox=(x, y, x + w, y + h)).save(fname, "PNG")
-            self.status.set(f"Saved window capture → {fname}")
+        except ImportError:
+            self.status.set("Capture needs Pillow — `pip install pillow`."); return
+        x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        w, h = self.root.winfo_width(), self.root.winfo_height()
+        try:
+            img = ImageGrab.grab(bbox=(x, y, x + w, y + h)).convert("RGB")
+            # embed at the screen's pixel density so the PDF stays crisp
+            img.save(fname, "PDF", resolution=float(self.root.winfo_fpixels("1i")))
+            self.status.set(f"Saved full-window PDF → {fname}")
         except Exception as e:
-            # fallback if PIL/ImageGrab is unavailable: high-res save of the figure
-            try:
-                self.fig.savefig(fname, dpi=300, bbox_inches="tight")
-                self.status.set(f"Window grab unavailable ({e}); saved figure @300dpi → {fname}")
-            except Exception as e2:
-                self.status.set(f"Capture failed: {e2}")
+            self.status.set(f"Capture failed: {e}")
 
 
 if __name__ == "__main__":
