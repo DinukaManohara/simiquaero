@@ -26,7 +26,8 @@ from bench_common import make_dataset, append_csv
 N_COLS = 3        # 2 descriptors + 1 target (fixed; only one sort column needed)
 
 
-def solve_islands_ip(df, target_col, sort_col, n_bins, frac, time_limit):
+def solve_islands_ip(df, target_col, sort_col, n_bins, frac, time_limit,
+                     warmup, repeats):
     tgt = df[target_col].to_numpy()
     bin_id = np.asarray(pd.cut(tgt, bins=n_bins, labels=range(n_bins),
                                include_lowest=True).astype(int))
@@ -67,14 +68,20 @@ def solve_islands_ip(df, target_col, sort_col, n_bins, frac, time_limit):
     build_sec = time.perf_counter() - t_build
 
     options = {"time_limit": time_limit} if time_limit else {}
-    t_solve = time.perf_counter()
-    res = milp(c=c, constraints=constraints, integrality=integrality,
-               bounds=Bounds(0, 1), options=options)
-    solve_sec = time.perf_counter() - t_solve
+    # solve the SAME MILP warmup+repeats times; keep only the recorded solve times
+    # (the optimum is deterministic, so only the solve wall-clock varies)
+    solve_secs, res = [], None
+    for r in range(warmup + repeats):
+        t_solve = time.perf_counter()
+        res = milp(c=c, constraints=constraints, integrality=integrality,
+                   bounds=Bounds(0, 1), options=options)
+        dt = time.perf_counter() - t_solve
+        if r >= warmup:
+            solve_secs.append(dt)
 
     islands = int(round(res.fun)) if res.fun is not None else None
     return dict(n_bins=n_bins, total_selected=sum(b.values()), islands=islands,
-                build_sec=round(build_sec, 4), solve_sec=round(solve_sec, 4),
+                build_sec=round(build_sec, 4), solve_secs=solve_secs,
                 status=int(res.status), optimal=bool(res.status == 0))
 
 
@@ -85,17 +92,24 @@ def main():
     ap.add_argument("--frac", type=float, default=0.5, help="fraction of each bin to select")
     ap.add_argument("--sort-col", default="f1", help="column to sort by (independent of target)")
     ap.add_argument("--time-limit", type=float, default=None, help="solver time limit (s)")
+    ap.add_argument("--warmup", type=int, default=2, help="unrecorded warm-up solves")
+    ap.add_argument("--repeats", type=int, default=3, help="recorded solves (one CSV row each)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="ip_results.csv")
     args = ap.parse_args()
 
     df, target_col = make_dataset(args.n_rows, N_COLS, seed=args.seed)
     res = solve_islands_ip(df, target_col, args.sort_col, args.bins,
-                           args.frac, args.time_limit)
-    row = dict(approach="ip_exact", n_rows=args.n_rows, n_cols=N_COLS, **res)
-    append_csv(args.out, row)
+                           args.frac, args.time_limit, args.warmup, args.repeats)
+    solve_secs = res.pop("solve_secs")
+    for rep, sec in enumerate(solve_secs):                 # one row per recorded solve
+        append_csv(args.out, dict(approach="ip_exact", n_rows=args.n_rows,
+                                  n_cols=N_COLS, seed=args.seed, rep=rep,
+                                  solve_sec=round(sec, 4), **res))
+    mean = sum(solve_secs) / len(solve_secs) if solve_secs else float("nan")
     print(f"[ip] n_rows={args.n_rows}  islands={res['islands']}  "
-          f"solve={res['solve_sec']}s  optimal={res['optimal']}  -> {args.out}")
+          f"solve_mean={mean:.4f}s over {len(solve_secs)} run(s)  "
+          f"optimal={res['optimal']}  -> {args.out}")
 
 
 if __name__ == "__main__":
