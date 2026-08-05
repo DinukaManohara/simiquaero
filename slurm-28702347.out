@@ -1,0 +1,42 @@
+>>> dt rows=32000 cols=3
+[dt-agnostic] rows=32000 cols=3  rule_length=4543  build=0.4679s query_mean=0.6708s over 3 run(s)  -> dt_rule_length_agnostic_cols.csv
+[dt-fixed] rows=32000 cols=3 boxes=4  TVD=0.237  build=0.47s query_mean=1.9806s over 3 run(s)  -> dt_rule_length_fixed_cols.csv
+>>> dt rows=32000 cols=5
+[dt-agnostic] rows=32000 cols=5  rule_length=3821  build=0.7183s query_mean=0.5994s over 3 run(s)  -> dt_rule_length_agnostic_cols.csv
+[dt-fixed] rows=32000 cols=5 boxes=4  TVD=0.1857  build=0.7159s query_mean=1.9871s over 3 run(s)  -> dt_rule_length_fixed_cols.csv
+>>> dt rows=32000 cols=9
+[dt-agnostic] rows=32000 cols=9  rule_length=3352  build=1.3504s query_mean=0.5900s over 3 run(s)  -> dt_rule_length_agnostic_cols.csv
+[dt-fixed] rows=32000 cols=9 boxes=4  TVD=0.1931  build=1.3579s query_mean=1.9554s over 3 run(s)  -> dt_rule_length_fixed_cols.csv
+>>> dt rows=32000 cols=17
+[dt-agnostic] rows=32000 cols=17  rule_length=3069  build=2.0762s query_mean=0.4839s over 3 run(s)  -> dt_rule_length_agnostic_cols.csv
+[dt-fixed] rows=32000 cols=17 boxes=4  TVD=0.2049  build=2.0772s query_mean=1.9154s over 3 run(s)  -> dt_rule_length_fixed_cols.csv
+>>> dt rows=32000 cols=33
+[dt-agnostic] rows=32000 cols=33  rule_length=2943  build=3.8664s query_mean=0.4552s over 3 run(s)  -> dt_rule_length_agnostic_cols.csv
+[dt-fixed] rows=32000 cols=33 boxes=4  TVD=0.2074  build=3.8762s query_mean=1.9132s over 3 run(s)  -> dt_rule_length_fixed_cols.csv
+>>> dt rows=32000 cols=65
+[dt-agnostic] rows=32000 cols=65  rule_length=2889  build=10.7499s query_mean=0.5509s over 3 run(s)  -> dt_rule_length_agnostic_cols.csv
+[dt-fixed] rows=32000 cols=65 boxes=4  TVD=0.2321  build=10.6683s query_mean=1.9296s over 3 run(s)  -> dt_rule_length_fixed_cols.csv
+done -> dt_rule_length_agnostic_cols.csv, dt_rule_length_fixed_cols.csv
+Job ID           : 28702347
+Cluster          : spartan
+User/Project     : bdezoysa/punim2258
+Nodes            : 1
+Wall-clock time  : 00:02:59 / 12:00:00
+
+Displaying overall resources usage from 2026-08-04 01:00:03 to 2026-08-04 01:03:02:
+
+NODE            CPU#        TOT%   ( USR   / SYS   / WIO   / IDLE  ) 
+
+spartan-bm181 : 
+                CPU# 1    : 66.8   (  63.6 /   3.1 /  14.3 /  18.9 ) 
+
+
+Allocated CPUs            : 1    
+  CPUs with usage <25%    : 0    
+  CPUs with usage <50%    : 0    
+  CPUs with usage >50%    : 1    
+
+Memory used (RAM)         : 0.5%  [348MB of 68720MB]
+
+--------------------------------------------
+

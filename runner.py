@@ -1,6 +1,7 @@
 import os
 
-tasks = ["dt_cols", "dt_rows", "ip"]
+# tasks = ["dt_cols", "dt_rows", "ip"]
+tasks = ["ip"]
 
 durations = {
     "dt_cols": 12,
