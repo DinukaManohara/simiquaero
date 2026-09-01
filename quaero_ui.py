@@ -7,7 +7,9 @@ Right panel: live pdf preview, result histogram, and the induced DNF rule.
 Backend: the quaero_tree pipeline (decision-tree index -> subtree-first selection
 -> lossless reduction to a DNF rule), embedded below so the app is standalone.
 """
+import os
 import math
+import importlib.util
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -20,17 +22,21 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk, scrolledtext, filedialog, messagebox
 
 
 # ----------------------------------------------------------------------------
 # Pipeline (embedded from quaero_tree)
 # ----------------------------------------------------------------------------
-def bin_target(df, target_col):
-    x = df[target_col].dropna().values
-    std = np.std(x, ddof=1)
-    h = 3.5 * std * (len(x) ** (-1 / 3))
-    n_bins = max(1, math.ceil((x.max() - x.min()) / h))
+def bin_target(df, target_col, max_bins=128):
+    """Scott's-rule binning of the target, guarded for real-world columns:
+    zero-variance, tiny, or discrete targets would otherwise blow up n_bins."""
+    x = pd.to_numeric(df[target_col], errors="coerce").dropna().to_numpy(dtype=float)
+    spread = float(x.max() - x.min()) if len(x) else 0.0
+    std = float(np.std(x, ddof=1)) if len(x) > 1 else 0.0
+    h = 3.5 * std * (len(x) ** (-1 / 3)) if std > 0 else 0.0
+    n_bins = max(1, math.ceil(spread / h)) if h > 0 and spread > 0 else 1
+    n_bins = min(n_bins, max_bins, max(1, len(np.unique(x))))   # never out-bin the data
     ids = pd.cut(df[target_col], bins=n_bins, labels=range(n_bins),
                  include_lowest=True).astype(int).to_numpy()
     return ids, n_bins
@@ -287,6 +293,66 @@ def default_dataset(N=1500, seed=42):
 
 
 # ----------------------------------------------------------------------------
+# Loading user-selected CSVs, using datasets/metadata.py when it knows the file
+# ----------------------------------------------------------------------------
+def load_metadata():
+    """Return the uci_datasets_info dict from datasets/metadata.py ({} if absent)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "datasets", "metadata.py")
+    if not os.path.exists(path):
+        return {}
+    try:
+        spec = importlib.util.spec_from_file_location("quaero_dataset_metadata", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return getattr(mod, "uci_datasets_info", {})
+    except Exception:
+        return {}
+
+
+METADATA = load_metadata()
+
+
+def read_dataset(path):
+    """Read a CSV by path.  If datasets/metadata.py knows this file's stem, use
+    its delimiter; otherwise let pandas sniff the separator.
+    Returns (raw_df, meta, name)."""
+    name = os.path.splitext(os.path.basename(path))[0]
+    meta = METADATA.get(name, {})
+    if meta.get("delim"):
+        raw = pd.read_csv(path, sep=meta["delim"])
+    else:
+        raw = pd.read_csv(path, sep=None, engine="python")   # sniff , ; \t
+    return raw, meta, name
+
+
+def target_candidates(raw, meta):
+    """Targets declared in the metadata, else every column that could be one."""
+    cands = [c for c in meta.get("target_variable", []) if c in raw.columns]
+    if cands:
+        return cands
+    ids = set(meta.get("id_variables", []))
+    return [c for c in raw.columns if c not in ids]
+
+
+def prepare_frame(raw, target_col, meta=None):
+    """Turn a raw CSV frame into a modelling frame for the pipeline:
+    drop id columns and the dataset's *other* declared targets (so they cannot
+    leak in as descriptors), integer-encode any non-numeric column, and drop
+    rows with missing/inf values."""
+    meta = meta or {}
+    drop = [c for c in meta.get("id_variables", []) if c in raw.columns]
+    drop += [c for c in meta.get("target_variable", [])
+             if c in raw.columns and c != target_col]
+    out = raw.drop(columns=drop, errors="ignore").copy()
+    for c in out.columns:                      # categoricals -> integer codes
+        if not pd.api.types.is_numeric_dtype(out[c]):
+            out[c] = pd.factorize(out[c])[0].astype(float)
+    out = out.replace([np.inf, -np.inf], np.nan).dropna()
+    return out.reset_index(drop=True)
+
+
+# ----------------------------------------------------------------------------
 # Distribution component specs (label -> default) per family
 # ----------------------------------------------------------------------------
 DIST_PARAMS = {
@@ -298,18 +364,69 @@ DIST_PARAMS = {
 
 
 class QueryUI:
-    def __init__(self, root, df, target_col):
+    def __init__(self, root, df, target_col, name="synthetic (default)"):
+        self.components = []                       # list of (name, params_dict, weight)
+        root.title("quaero — distributional query builder")
+        self._build(root)
+        self._set_dataset(df, target_col, name)
+
+    # ---- (re)point the UI at a dataset, then rebuild the index ----
+    def _set_dataset(self, df, target_col, name):
         self.df, self.target_col = df, target_col
         self.N = len(df)
         self.bin_ids, self.n_bins = bin_target(df, target_col)
         self.centers = _bin_centers(df, target_col, self.n_bins)
         self.avail = {b: int((self.bin_ids == b).sum()) for b in range(self.n_bins)}
         self.tmin = float(df[target_col].min()); self.tmax = float(df[target_col].max())
-        self.components = []                       # list of (name, params_dict, weight)
 
-        root.title("quaero — distributional query builder")
-        self._build(root)
-        root.after(50, self._build_index_async)   # build index just after UI shows
+        self.ds_lab.config(text=f"{name}\nN={self.N}, {df.shape[1] - 1} descriptors, "
+                                f"{self.n_bins} bins")
+        self.subsets = []                          # results belong to the old dataset
+        self.subset_list.delete(0, "end")
+        self.rule.delete("1.0", "end")
+        self.ax_hist.clear()
+        if hasattr(self, "ix"):
+            del self.ix
+        self.root.after(50, self._build_index_async)
+
+    # ---- pick a CSV from the file system ----
+    def _load_csv(self):
+        path = filedialog.askopenfilename(
+            title="Select a dataset CSV",
+            filetypes=[("CSV / TSV", "*.csv *.tsv *.txt"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            raw, meta, name = read_dataset(path)
+        except Exception as e:
+            messagebox.showerror("Could not read file", str(e)); return
+        cands = target_candidates(raw, meta)
+        if not cands:
+            messagebox.showerror("No usable columns", "That file has no target column.")
+            return
+        self._raw, self._meta, self._name = raw, meta, name
+        known = "metadata" if meta else "no metadata — sniffed"
+        self.status.set(f"Loaded {name} ({known}); {len(raw)} rows, {raw.shape[1]} cols.")
+        self.tgt_cb.config(values=cands)
+        self.tgt_var.set(cands[0])
+        self._apply_target()
+
+    def _apply_target(self, *_):
+        """Build the modelling frame for the currently selected target column."""
+        if not hasattr(self, "_raw"):
+            return
+        tcol = self.tgt_var.get()
+        try:
+            frame = prepare_frame(self._raw, tcol, self._meta)
+            if tcol not in frame.columns:
+                raise ValueError(f"'{tcol}' did not survive cleaning (all-NaN?).")
+            if frame.shape[1] < 2:
+                raise ValueError("need at least one descriptor column besides the target.")
+            if len(frame) < 10:
+                raise ValueError(f"only {len(frame)} complete rows after dropping NaNs.")
+            self._set_dataset(frame, tcol, self._name)
+        except Exception as e:
+            messagebox.showerror("Could not use this target", str(e))
 
     # ---- index (built once) ----
     def _build_index_async(self):
@@ -327,67 +444,83 @@ class QueryUI:
         right = ttk.Frame(root, padding=8); right.grid(row=0, column=1, sticky="nsew")
         root.columnconfigure(1, weight=1); root.rowconfigure(0, weight=1)
 
+        # ---- dataset picker (own CSV from the file system) ----
+        ds = ttk.LabelFrame(left, text="Dataset", padding=6)
+        ds.grid(row=0, column=0, sticky="we", pady=(0, 8))
+        ds.columnconfigure(1, weight=1)
+        ttk.Button(ds, text="Load CSV …", command=self._load_csv).grid(
+            row=0, column=0, sticky="w")
+        self.ds_lab = ttk.Label(ds, text="—", wraplength=170, foreground="#333")
+        self.ds_lab.grid(row=0, column=1, sticky="w", padx=(6, 0))
+        ttk.Label(ds, text="target column").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.tgt_var = tk.StringVar()
+        self.tgt_cb = ttk.Combobox(ds, textvariable=self.tgt_var, state="readonly", width=20)
+        self.tgt_cb.grid(row=1, column=1, sticky="we", pady=(4, 0))
+        self.tgt_cb.bind("<<ComboboxSelected>>", self._apply_target)
+
+        body = ttk.Frame(left); body.grid(row=1, column=0, sticky="nsew")
+
         # component builder
-        ttk.Label(left, text="Add distribution component", font=("", 10, "bold")).grid(
+        ttk.Label(body, text="Add distribution component", font=("", 10, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w")
         self.kind = tk.StringVar(value="gaussian")
-        cb = ttk.Combobox(left, textvariable=self.kind, values=list(DIST_PARAMS),
+        cb = ttk.Combobox(body, textvariable=self.kind, values=list(DIST_PARAMS),
                           state="readonly", width=14)
         cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=2)
         cb.bind("<<ComboboxSelected>>", lambda e: self._sync_param_labels())
 
-        self.p1lab = ttk.Label(left, text="loc"); self.p1lab.grid(row=2, column=0, sticky="w")
-        self.p1 = ttk.Entry(left, width=10); self.p1.grid(row=2, column=1, sticky="w")
-        self.p2lab = ttk.Label(left, text="scale"); self.p2lab.grid(row=3, column=0, sticky="w")
-        self.p2 = ttk.Entry(left, width=10); self.p2.grid(row=3, column=1, sticky="w")
-        ttk.Label(left, text="weight").grid(row=4, column=0, sticky="w")
-        self.wt = ttk.Entry(left, width=10); self.wt.grid(row=4, column=1, sticky="w")
+        self.p1lab = ttk.Label(body, text="loc"); self.p1lab.grid(row=2, column=0, sticky="w")
+        self.p1 = ttk.Entry(body, width=10); self.p1.grid(row=2, column=1, sticky="w")
+        self.p2lab = ttk.Label(body, text="scale"); self.p2lab.grid(row=3, column=0, sticky="w")
+        self.p2 = ttk.Entry(body, width=10); self.p2.grid(row=3, column=1, sticky="w")
+        ttk.Label(body, text="weight").grid(row=4, column=0, sticky="w")
+        self.wt = ttk.Entry(body, width=10); self.wt.grid(row=4, column=1, sticky="w")
         self.wt.insert(0, "1.0")
         self._sync_param_labels()
 
-        ttk.Button(left, text="Add component", command=self._add).grid(
+        ttk.Button(body, text="Add component", command=self._add).grid(
             row=5, column=0, pady=4, sticky="w")
-        ttk.Button(left, text="Clear all", command=self._clear).grid(
+        ttk.Button(body, text="Clear all", command=self._clear).grid(
             row=5, column=1, pady=4, sticky="w")
 
-        ttk.Label(left, text="Mixture components").grid(row=6, column=0, columnspan=2, sticky="w")
-        self.comp_list = tk.Listbox(left, height=6, width=32)
+        ttk.Label(body, text="Mixture components").grid(row=6, column=0, columnspan=2, sticky="w")
+        self.comp_list = tk.Listbox(body, height=6, width=32)
         self.comp_list.grid(row=7, column=0, columnspan=2, sticky="we")
 
         # cardinality + feasibility
-        ttk.Separator(left, orient="horizontal").grid(row=8, column=0, columnspan=2,
+        ttk.Separator(body, orient="horizontal").grid(row=8, column=0, columnspan=2,
                                                        sticky="we", pady=6)
-        ttk.Label(left, text="Cardinality (% of rows)").grid(row=9, column=0, columnspan=2, sticky="w")
+        ttk.Label(body, text="Cardinality (% of rows)").grid(row=9, column=0, columnspan=2, sticky="w")
         self.pct = tk.DoubleVar(value=30.0)
-        sc = ttk.Scale(left, from_=1, to=100, variable=self.pct, command=lambda e: self._refresh())
+        sc = ttk.Scale(body, from_=1, to=100, variable=self.pct, command=lambda e: self._refresh())
         sc.grid(row=10, column=0, columnspan=2, sticky="we")
-        self.pct_lab = ttk.Label(left, text="30%"); self.pct_lab.grid(row=11, column=0, sticky="w")
-        self.feas = ttk.Label(left, text="", font=("", 9, "bold")); self.feas.grid(
+        self.pct_lab = ttk.Label(body, text="30%"); self.pct_lab.grid(row=11, column=0, sticky="w")
+        self.feas = ttk.Label(body, text="", font=("", 9, "bold")); self.feas.grid(
             row=11, column=1, sticky="w")
 
-        ttk.Label(left, text="Max TVD threshold").grid(row=12, column=0, sticky="w")
-        self.tvd_thr = ttk.Entry(left, width=10); self.tvd_thr.grid(row=12, column=1, sticky="w")
+        ttk.Label(body, text="Max TVD threshold").grid(row=12, column=0, sticky="w")
+        self.tvd_thr = ttk.Entry(body, width=10); self.tvd_thr.grid(row=12, column=1, sticky="w")
         self.tvd_thr.insert(0, "0.10")
 
-        ttk.Label(left, text="# bounding boxes").grid(row=13, column=0, sticky="w")
+        ttk.Label(body, text="# bounding boxes").grid(row=13, column=0, sticky="w")
         self.n_boxes = tk.IntVar(value=2)
-        ttk.Spinbox(left, from_=1, to=10, textvariable=self.n_boxes, width=8).grid(
+        ttk.Spinbox(body, from_=1, to=10, textvariable=self.n_boxes, width=8).grid(
             row=13, column=1, sticky="w")
 
-        ttk.Button(left, text="Query by cardinality (subsets)", command=self._process).grid(
+        ttk.Button(body, text="Query by cardinality (subsets)", command=self._process).grid(
             row=14, column=0, columnspan=2, pady=(8, 2), sticky="we")
-        ttk.Button(left, text="Query by # boxes (best match)", command=self._process_boxes).grid(
+        ttk.Button(body, text="Query by # boxes (best match)", command=self._process_boxes).grid(
             row=15, column=0, columnspan=2, pady=(0, 8), sticky="we")
 
-        ttk.Label(left, text="Results (select to view)").grid(
+        ttk.Label(body, text="Results (select to view)").grid(
             row=16, column=0, columnspan=2, sticky="w")
-        self.subset_list = tk.Listbox(left, height=6, width=32)
+        self.subset_list = tk.Listbox(body, height=6, width=32)
         self.subset_list.grid(row=17, column=0, columnspan=2, sticky="we")
         self.subset_list.bind("<<ListboxSelect>>", self._on_subset_select)
         self.subsets = []
 
         self.status = tk.StringVar(value="starting …")
-        ttk.Label(left, textvariable=self.status, foreground="#555",
+        ttk.Label(body, textvariable=self.status, foreground="#555",
                   wraplength=240).grid(row=18, column=0, columnspan=2, sticky="w")
 
         # right: figures (top) + rule text (bottom).  Grid with row weights so the
