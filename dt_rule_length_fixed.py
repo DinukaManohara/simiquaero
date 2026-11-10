@@ -16,7 +16,7 @@ import argparse
 import time
 
 from bench_common import (make_dataset, build_index, gaussian_target,
-                          find_best_boxes, append_csv)
+                          find_best_boxes, dist_metrics, append_csv)
 
 
 def run(n_rows, n_cols, n_boxes, seed, warmup, repeats):
@@ -42,7 +42,7 @@ def run(n_rows, n_cols, n_boxes, seed, warmup, repeats):
     base = dict(approach="dt_rule_length_fixed", n_rows=n_rows, n_cols=n_cols,
                 seed=seed, n_bins=n_bins, tree_nodes=ix["n"], leaves=len(ix["leaves"]),
                 n_boxes=res["n_boxes"], rule_length=res["n_boxes"], selected=selected,
-                tvd=round(res["tvd"], 4), build_sec=round(build_sec, 4))
+                **dist_metrics(res["got"], res["tc"]), build_sec=round(build_sec, 4))
     return base, query_secs
 
 

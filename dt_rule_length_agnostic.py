@@ -16,7 +16,7 @@ import argparse
 import time
 
 from bench_common import (make_dataset, build_index, gaussian_target,
-                          select_subtrees, reduce_labeling, tv_distance, append_csv)
+                          select_subtrees, reduce_labeling, dist_metrics, append_csv)
 
 
 def run(n_rows, n_cols, pct, seed, warmup, repeats):
@@ -43,7 +43,7 @@ def run(n_rows, n_cols, pct, seed, warmup, repeats):
     base = dict(approach="dt_rule_length_agnostic", n_rows=n_rows, n_cols=n_cols,
                 seed=seed, n_bins=n_bins, tree_nodes=ix["n"], leaves=len(ix["leaves"]),
                 selected=sum(labels.values()), rule_length=red["n_terms"],
-                tvd=round(tv_distance(got, tc), 4), build_sec=round(build_sec, 4))
+                **dist_metrics(got, tc), build_sec=round(build_sec, 4))
     return base, query_secs
 
 

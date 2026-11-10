@@ -150,6 +150,32 @@ def tv_distance(got, tc):
     return 0.5 * sum(abs(got.get(b, 0) / gs - tc.get(b, 0) / ts) for b in bins)
 
 
+def dist_metrics(got, tc, eps=1e-12):
+    """Distances between the found subset's bin distribution (`got`) and the
+    target (`tc`).  Both may be counts or proportions; they are normalised over
+    the union of their bins.  KLD is KL(target || subset), eps-smoothed so a
+    bin the subset misses gives a large finite value instead of inf."""
+    bins = sorted(set(got) | set(tc))
+    q = np.array([got.get(b, 0.0) for b in bins], dtype=float)   # subset
+    p = np.array([tc.get(b, 0.0) for b in bins], dtype=float)    # target
+    if q.sum() <= 0 or p.sum() <= 0:
+        return dict(tvd=1.0, jsd=1.0, kld=float("inf"), hellinger=1.0, bc=0.0)
+    p, q = p / p.sum(), q / q.sum()
+
+    tvd = 0.5 * np.abs(p - q).sum()
+    bc = float(np.sqrt(p * q).sum())
+    hellinger = float(np.sqrt(max(0.0, 1.0 - bc)))
+
+    ps, qs = (p + eps) / (p + eps).sum(), (q + eps) / (q + eps).sum()
+    kld = float(np.sum(ps * np.log(ps / qs)))                    # nats
+    m = 0.5 * (ps + qs)
+    jsd = float(0.5 * np.sum(ps * np.log2(ps / m)) +
+                0.5 * np.sum(qs * np.log2(qs / m)))              # bits, in [0, 1]
+
+    return dict(tvd=round(float(tvd), 4), jsd=round(jsd, 4), kld=round(kld, 4),
+                hellinger=round(hellinger, 4), bc=round(bc, 4))
+
+
 def select_subtrees(ix, target, total=None, excluded=None, cap_slack=0.02):
     excluded = excluded or set()
     bins = sorted(ix["node_cnt"][0])
