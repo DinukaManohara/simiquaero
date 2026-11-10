@@ -22,8 +22,9 @@ from tkinter import ttk, scrolledtext, filedialog, messagebox
 
 from quaero_core import (bin_target, _bin_centers, make_pdf, build_index,
                          find_multiple_subsets, selected_rows, find_best_boxes,
-                         dnf_to_str, default_dataset, read_dataset,
-                         target_candidates, prepare_frame)
+                         default_dataset, read_dataset, target_candidates,
+                         prepare_frame, simplify_rule, rule_to_str,
+                         rank_by_rule_length)
 
 
 # ----------------------------------------------------------------------------
@@ -353,18 +354,19 @@ class QueryUI:
         total = round(self.pct.get() / 100.0 * self.N)
 
         self.status.set("Searching for subsets …"); self.root.update_idletasks()
-        self.subsets = find_multiple_subsets(self.ix, target, total, thr)
+        self.subsets = rank_by_rule_length(find_multiple_subsets(self.ix, target, total, thr))
 
         self.subset_list.delete(0, "end")
         for i, s in enumerate(self.subsets):
             self.subset_list.insert(
                 "end", f"#{i + 1}: {len(s['rows'])} rows, TVD={s['tvd']:.3f}, "
-                       f"{s['red']['n_terms']} terms")
+                       f"{s['simple']['n_terms']} terms / {s['simple']['n_literals']} lits")
         if self.subsets:
             self.subset_list.selection_clear(0, "end")
             self.subset_list.selection_set(0)
             self._show_subset(0)
-            self.status.set(f"Found {len(self.subsets)} disjoint subset(s) under TVD {thr:.3f}.")
+            self.status.set(f"Found {len(self.subsets)} disjoint subset(s) under TVD {thr:.3f}, "
+                            f"sorted by rule length.")
         else:
             self.ax_hist.clear(); self.canvas.draw()
             self.rule.delete("1.0", "end")
@@ -382,13 +384,17 @@ class QueryUI:
         self.status.set(f"Searching best {k} box(es) …"); self.root.update_idletasks()
         res = find_best_boxes(self.ix, target, k)
         res["rows"] = selected_rows(self.ix, res["labels"])
+        res["simple"] = simplify_rule(res["red"]["dnf"])        # sympy reduction
         self.subsets = [res]
         self.subset_list.delete(0, "end")
         self.subset_list.insert(
-            "end", f"{res['n_boxes']} box(es): {len(res['rows'])} rows, TVD={res['tvd']:.3f}")
+            "end", f"{res['n_boxes']} box(es) → {res['simple']['n_terms']} terms / "
+                   f"{res['simple']['n_literals']} lits: {len(res['rows'])} rows, "
+                   f"TVD={res['tvd']:.3f}")
         self.subset_list.selection_clear(0, "end"); self.subset_list.selection_set(0)
         self._show_subset(0)
-        self.status.set(f"Best {res['n_boxes']} box(es): TVD={res['tvd']:.3f}.")
+        self.status.set(f"Best {res['n_boxes']} box(es): TVD={res['tvd']:.3f}, "
+                        f"simplified to {res['simple']['n_terms']} term(s).")
 
     def _on_subset_select(self, event):
         sel = self.subset_list.curselection()
@@ -411,8 +417,9 @@ class QueryUI:
                               color="tomato", label=f"subset #{i + 1} (n={len(sel)})")
         xs = np.linspace(self.tmin, self.tmax, 400)
         self.ax_hist.plot(xs, [pdf(x) for x in xs], "k--", lw=1.3, label="specified pdf")
+        simple = s["simple"]
         self.ax_hist.set_title(f"Subset #{i + 1} — TVD={s['tvd']:.3f}, "
-                               f"{red['n_terms']} rule terms")
+                               f"{simple['n_terms']} terms / {simple['n_literals']} lits")
         self.ax_hist.set_xlabel(self.target_col); self.ax_hist.set_yticks([])
         self.ax_hist.legend(fontsize=FOOTNOTE_PT)
         self.fig.tight_layout(pad=2.0); self.canvas.draw()
@@ -420,8 +427,9 @@ class QueryUI:
         self.rule.delete("1.0", "end")
         self.rule.insert("end",
             f"subset #{i + 1}   rows: {len(sel)} / {self.N}   TVD: {s['tvd']:.4f}   "
-            f"DNF terms: {red['n_terms']}   reduced size: {red['reduced_size']}\n\n")
-        self.rule.insert("end", dnf_to_str(red["dnf"], max_terms=20))
+            f"terms: {simple['n_terms']} (tree: {red['n_terms']})   "
+            f"literals: {simple['n_literals']}\n\n")
+        self.rule.insert("end", rule_to_str(simple, max_terms=20))
 
     # ---- capture the WHOLE Tk window to a high-quality PDF ----
     def _capture(self, *_):

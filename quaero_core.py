@@ -7,13 +7,15 @@ does not touch tkinter or the matplotlib backend.
   load:   read_dataset -> target_candidates -> prepare_frame
   index:  build_index  (Scott's-rule target bins, purity-grown decision tree)
   query:  find_multiple_subsets (by cardinality)  |  find_best_boxes (by #boxes)
-  rule:   reduce_labeling / dnf_to_str
+  rule:   reduce_labeling -> simplify_rule (sympy) -> rule_to_str
+  rank:   rank_by_rule_length (shortest simplified rule first)
 """
 import os
 import math
 import importlib.util
 import numpy as np
 import pandas as pd
+import sympy as sp
 from scipy import stats as scipy_stats
 from sklearn.tree import DecisionTreeClassifier
 
@@ -236,6 +238,99 @@ def dnf_to_str(dnf, max_terms=12):
     if len(dnf) > max_terms:
         out += f"\n  ... (+{len(dnf) - max_terms} more terms)"
     return out
+
+
+# ----------------------------------------------------------------------------
+# Rule simplification (sympy interval algebra) + ranking by rule length
+# ----------------------------------------------------------------------------
+_FULL = sp.Interval(-sp.oo, sp.oo)
+
+
+def _term_box(term):
+    """One DNF conjunct -> {feature: sympy Interval}.  Tree splits are
+    x <= t  -> (-oo, t]  and  x > t -> (t, oo); repeats are intersected."""
+    box = {}
+    for f, op, t in term:
+        iv = (sp.Interval.Lopen(-sp.oo, sp.Float(t)) if op == "<="
+              else sp.Interval.open(sp.Float(t), sp.oo))
+        box[f] = box.get(f, _FULL) & iv
+    return box
+
+
+def _merge_boxes(boxes):
+    """Merge boxes that agree on every feature but one and whose intervals on
+    that feature form a single interval.  Repeats until nothing merges.
+    The union of the boxes is unchanged."""
+    boxes = [dict(b) for b in boxes]
+    changed = True
+    while changed:
+        changed = False
+        for f in sorted({g for b in boxes for g in b}):
+            groups = {}
+            for b in boxes:
+                key = frozenset((g, iv) for g, iv in b.items() if g != f and iv != _FULL)
+                groups.setdefault(key, []).append(b)
+            merged = []
+            for grp in groups.values():
+                grp.sort(key=lambda b: b.get(f, _FULL).inf)
+                cur = grp[0]
+                for b in grp[1:]:
+                    u = sp.Union(cur.get(f, _FULL), b.get(f, _FULL))
+                    if isinstance(u, sp.Interval):             # touching/overlapping
+                        cur, changed = {**cur, f: u}, True
+                    else:
+                        merged.append(cur); cur = b
+                merged.append(cur)
+            boxes = merged
+    return [{g: iv for g, iv in b.items() if iv != _FULL} for b in boxes]
+
+
+def _box_expr(box):
+    lits = []
+    for f, iv in sorted(box.items()):
+        x = sp.Symbol(f)
+        if iv.inf != -sp.oo:
+            lits.append(x > iv.inf if iv.left_open else x >= iv.inf)
+        if iv.sup != sp.oo:
+            lits.append(x < iv.sup if iv.right_open else x <= iv.sup)
+    return sp.And(*lits), len(lits)
+
+
+def simplify_rule(dnf):
+    """Reduce a tree DNF with sympy interval algebra.  Returns the boxes, the
+    sympy expression, and the reduced n_terms / n_literals."""
+    boxes = _merge_boxes([_term_box(t) for t in dnf])
+    parts = [_box_expr(b) for b in boxes]
+    return dict(boxes=boxes,
+                expr=sp.Or(*[e for e, _ in parts]) if parts else sp.false,
+                n_terms=len(boxes), n_literals=sum(k for _, k in parts))
+
+
+def rule_to_str(simple, max_terms=20, prec=3):
+    """Readable form: one box per line, chained bounds like 0.938 < x <= 1.509."""
+    def iv_str(f, iv):
+        if iv.sup == sp.oo:                                    # lower bound only: x > lo
+            return f"{f} {'>' if iv.left_open else '>='} {float(iv.inf):.{prec}f}"
+        lo = "" if iv.inf == -sp.oo else f"{float(iv.inf):.{prec}f} {'<' if iv.left_open else '<='} "
+        return f"{lo}{f} {'<' if iv.right_open else '<='} {float(iv.sup):.{prec}f}"
+    terms = ["(" + " AND ".join(iv_str(f, iv) for f, iv in sorted(b.items())) + ")"
+             if b else "(TRUE)" for b in simple["boxes"][:max_terms]]
+    out = "\n  OR ".join(terms) if terms else "(FALSE)"
+    if simple["n_terms"] > max_terms:
+        out += f"\n  ... (+{simple['n_terms'] - max_terms} more terms)"
+    return out
+
+
+def rank_by_rule_length(results, by="terms"):
+    """Attach each result's simplified rule (res["simple"]) and sort shortest
+    first: terms, then literals, then TVD (by="literals" swaps the first two)."""
+    for r in results:
+        r["simple"] = simplify_rule(r["red"]["dnf"])
+    if by == "terms":
+        key = lambda r: (r["simple"]["n_terms"], r["simple"]["n_literals"], r["tvd"])
+    else:
+        key = lambda r: (r["simple"]["n_literals"], r["simple"]["n_terms"], r["tvd"])
+    return sorted(results, key=key)
 
 
 def _leaf_intervals(ix):
