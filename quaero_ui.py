@@ -16,6 +16,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 
 
@@ -23,6 +24,37 @@ from quaero_core import (bin_target, _bin_centers, make_pdf, build_index,
                          find_multiple_subsets, selected_rows, find_best_boxes,
                          dnf_to_str, default_dataset, read_dataset,
                          target_candidates, prepare_frame)
+
+
+# ----------------------------------------------------------------------------
+# UI typography: Courier at LaTeX \footnotesize.
+# \footnotesize = 8pt in a 10pt document (9pt at 11pt, 10pt at 12pt).
+# ----------------------------------------------------------------------------
+FOOTNOTE_PT = 8
+UI_FONT_FAMILIES = ["Courier", "Courier New", "Nimbus Mono PS", "Liberation Mono"]
+
+matplotlib.rcParams.update({
+    "font.family": "monospace",
+    "font.monospace": UI_FONT_FAMILIES + ["DejaVu Sans Mono"],
+    "font.size": FOOTNOTE_PT,
+    "axes.titlesize": FOOTNOTE_PT,
+    "axes.labelsize": FOOTNOTE_PT,
+    "xtick.labelsize": FOOTNOTE_PT,
+    "ytick.labelsize": FOOTNOTE_PT,
+    "legend.fontsize": FOOTNOTE_PT,
+})
+
+
+def apply_ui_font(root):
+    """Point every Tk named font at Courier/footnote size; return the family used."""
+    available = set(tkfont.families(root))
+    family = next((f for f in UI_FONT_FAMILIES if f in available), "Courier")
+    for name in ("TkDefaultFont", "TkTextFont", "TkFixedFont", "TkMenuFont",
+                 "TkHeadingFont", "TkCaptionFont", "TkSmallCaptionFont",
+                 "TkIconFont", "TkTooltipFont"):
+        tkfont.nametofont(name, root=root).configure(family=family, size=FOOTNOTE_PT)
+    root.option_add("*TCombobox*Listbox.font", (family, FOOTNOTE_PT))
+    return family
 
 
 
@@ -40,6 +72,7 @@ DIST_PARAMS = {
 class QueryUI:
     def __init__(self, root, df, target_col, name="synthetic (default)"):
         self.components = []                       # list of (name, params_dict, weight)
+        self.font_family = apply_ui_font(root)
         root.title("quaero — distributional query builder")
         self._build(root)
         self._set_dataset(df, target_col, name)
@@ -135,7 +168,8 @@ class QueryUI:
         body = ttk.Frame(left); body.grid(row=1, column=0, sticky="nsew")
 
         # component builder
-        ttk.Label(body, text="Add distribution component", font=("", 10, "bold")).grid(
+        ttk.Label(body, text="Add distribution component",
+                  font=(self.font_family, FOOTNOTE_PT, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w")
         self.kind = tk.StringVar(value="gaussian")
         cb = ttk.Combobox(body, textvariable=self.kind, values=list(DIST_PARAMS),
@@ -169,7 +203,8 @@ class QueryUI:
         sc = ttk.Scale(body, from_=1, to=100, variable=self.pct, command=lambda e: self._refresh())
         sc.grid(row=10, column=0, columnspan=2, sticky="we")
         self.pct_lab = ttk.Label(body, text="30%"); self.pct_lab.grid(row=11, column=0, sticky="w")
-        self.feas = ttk.Label(body, text="", font=("", 9, "bold")); self.feas.grid(
+        self.feas = ttk.Label(body, text="", font=(self.font_family, FOOTNOTE_PT, "bold"))
+        self.feas.grid(
             row=11, column=1, sticky="w")
 
         ttk.Label(body, text="Max TVD threshold").grid(row=12, column=0, sticky="w")
@@ -365,7 +400,7 @@ class QueryUI:
         self.ax_hist.set_title(f"Subset #{i + 1} — TVD={s['tvd']:.3f}, "
                                f"{red['n_terms']} rule terms")
         self.ax_hist.set_xlabel(self.target_col); self.ax_hist.set_yticks([])
-        self.ax_hist.legend(fontsize=7)
+        self.ax_hist.legend(fontsize=FOOTNOTE_PT)
         self.fig.tight_layout(pad=2.0); self.canvas.draw()
 
         self.rule.delete("1.0", "end")
