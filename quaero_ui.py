@@ -62,11 +62,14 @@ def apply_ui_font(root):
 # Distribution component specs (label -> default) per family
 # ----------------------------------------------------------------------------
 DIST_PARAMS = {
-    "gaussian":    [("loc", "0.5"),  ("scale", "0.15")],
-    "exponential": [("loc", "0.0"),  ("scale", "0.20")],
-    "uniform":     [("loc", "0.0"),  ("scale", "1.00")],
-    "beta":        [("a",   "2.0"),  ("b",     "2.0")],
+    "gaussian":    [("loc", "0.5"),   ("scale", "0.15")],
+    "exponential": [("loc", "0.0"),   ("scale", "0.20")],
+    "uniform":     [("loc", "0.0"),   ("scale", "1.00")],
+    "beta":        [("a",   "2.0"),   ("b",     "2.0")],
+    "weibull":     [("shape", "1.5"), ("scale", "0.30"), ("loc", "0.0")],
+    "lognormal":   [("mu",  "-1.0"),  ("sigma", "0.5"),  ("loc", "0.0")],
 }
+MAX_PARAMS = max(len(v) for v in DIST_PARAMS.values())
 
 
 class QueryUI:
@@ -177,12 +180,17 @@ class QueryUI:
         cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=2)
         cb.bind("<<ComboboxSelected>>", lambda e: self._sync_param_labels())
 
-        self.p1lab = ttk.Label(body, text="loc"); self.p1lab.grid(row=2, column=0, sticky="w")
-        self.p1 = ttk.Entry(body, width=10); self.p1.grid(row=2, column=1, sticky="w")
-        self.p2lab = ttk.Label(body, text="scale"); self.p2lab.grid(row=3, column=0, sticky="w")
-        self.p2 = ttk.Entry(body, width=10); self.p2.grid(row=3, column=1, sticky="w")
-        ttk.Label(body, text="weight").grid(row=4, column=0, sticky="w")
-        self.wt = ttk.Entry(body, width=10); self.wt.grid(row=4, column=1, sticky="w")
+        # parameter fields (as many as the family needs) + weight, in one sub-frame
+        # spanning the rows the old fixed two-parameter layout used
+        pf = ttk.Frame(body)
+        pf.grid(row=2, column=0, rowspan=3, columnspan=2, sticky="w")
+        self.plabs, self.pents = [], []
+        for j in range(MAX_PARAMS):
+            lab = ttk.Label(pf, text="");  lab.grid(row=j, column=0, sticky="w")
+            ent = ttk.Entry(pf, width=10); ent.grid(row=j, column=1, sticky="w")
+            self.plabs.append(lab); self.pents.append(ent)
+        ttk.Label(pf, text="weight").grid(row=MAX_PARAMS, column=0, sticky="w")
+        self.wt = ttk.Entry(pf, width=10); self.wt.grid(row=MAX_PARAMS, column=1, sticky="w")
         self.wt.insert(0, "1.0")
         self._sync_param_labels()
 
@@ -258,21 +266,27 @@ class QueryUI:
 
     # ---- component helpers ----
     def _sync_param_labels(self):
-        (l1, d1), (l2, d2) = DIST_PARAMS[self.kind.get()]
-        self.p1lab.config(text=l1); self.p2lab.config(text=l2)
-        for e, d in ((self.p1, d1), (self.p2, d2)):
-            e.delete(0, "end"); e.insert(0, d)
+        spec = DIST_PARAMS[self.kind.get()]
+        for j, (lab, ent) in enumerate(zip(self.plabs, self.pents)):
+            ent.delete(0, "end")
+            if j < len(spec):
+                lab.config(text=spec[j][0]); ent.insert(0, spec[j][1])
+                lab.grid(); ent.grid()
+            else:
+                lab.grid_remove(); ent.grid_remove()
 
     def _add(self):
+        kind = self.kind.get()
         try:
-            (l1, _), (l2, _) = DIST_PARAMS[self.kind.get()]
-            params = {l1: float(self.p1.get()), l2: float(self.p2.get())}
+            params = {name: float(e.get())
+                      for (name, _), e in zip(DIST_PARAMS[kind], self.pents)}
             w = float(self.wt.get())
-        except ValueError:
-            self.status.set("Invalid number in a parameter/weight field."); return
-        self.components.append((self.kind.get(), params, w))
+            make_pdf((kind, params))                 # e.g. rejects sigma <= 0
+        except ValueError as e:
+            self.status.set(f"Invalid component: {e}"); return
+        self.components.append((kind, params, w))
         ps = ", ".join(f"{k}={v}" for k, v in params.items())
-        self.comp_list.insert("end", f"{self.kind.get()}({ps})  w={w}")
+        self.comp_list.insert("end", f"{kind}({ps})  w={w}")
         self._refresh()
 
     def _clear(self):

@@ -43,15 +43,44 @@ def _bin_centers(df, target_col, n_bins):
     return (e[:-1] + e[1:]) / 2
 
 
+DISTRIBUTIONS = {
+    "gaussian": scipy_stats.norm, "normal": scipy_stats.norm,
+    "exponential": scipy_stats.expon, "uniform": scipy_stats.uniform,
+    "beta": scipy_stats.beta,
+    "weibull": scipy_stats.weibull_min,                  # shape k, scale lambda, loc
+    "lognormal": scipy_stats.lognorm, "log-normal": scipy_stats.lognorm,
+}
+
+
+def _component(name, params):
+    """(scipy distribution, scipy kwargs) for one mixture component.  Weibull
+    takes shape/scale/loc; Log-Normal takes mu/sigma/loc with
+    ln(X - loc) ~ N(mu, sigma^2).  scipy's own names (c, s) pass through."""
+    key = name.lower()
+    if key not in DISTRIBUTIONS:
+        raise ValueError(f"unknown distribution {name!r}; choose from "
+                         f"{', '.join(sorted(DISTRIBUTIONS))}")
+    bad = [k for k in ("scale", "shape", "sigma", "c", "s", "a", "b")
+           if k in params and params[k] <= 0]                # report the names as typed
+    if bad:
+        raise ValueError(f"{name}: {', '.join(bad)} must be > 0")
+    p = dict(params)
+    if key == "weibull" and "shape" in p:
+        p["c"] = p.pop("shape")
+    if key in ("lognormal", "log-normal"):
+        if "sigma" in p:
+            p["s"] = p.pop("sigma")
+        if "mu" in p:
+            p["scale"] = math.exp(p.pop("mu"))
+    return DISTRIBUTIONS[key], p
+
+
 def make_pdf(spec):
-    DIST = {"gaussian": scipy_stats.norm, "normal": scipy_stats.norm,
-            "exponential": scipy_stats.expon, "uniform": scipy_stats.uniform,
-            "beta": scipy_stats.beta}
     if isinstance(spec, tuple):
-        name, p = spec; d = DIST[name.lower()]
+        d, p = _component(*spec)
         return lambda x: d.pdf(x, **p)
     tot = sum(w for *_, w in spec) or 1.0
-    comp = [(DIST[n.lower()], p, w / tot) for n, p, w in spec]
+    comp = [(*_component(n, p), w / tot) for n, p, w in spec]
     return lambda x: sum(w * d.pdf(x, **p) for d, p, w in comp)
 
 
