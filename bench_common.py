@@ -220,9 +220,11 @@ def reduce_labeling(ix, labels):
     return dict(node_label=lab, antichain=A, dnf=dnf, n_terms=len(A))
 
 
-def find_multiple_subsets(ix, target, total, tvd_threshold, max_subsets=50):
+def find_multiple_subsets(ix, target, total, tvd_threshold):
+    """Disjoint cardinality-`total` subsets, run to exhaustion (nothing more
+    selectable or TVD threshold exceeded)."""
     excluded, results = set(), []
-    while len(results) < max_subsets:
+    while True:
         labels, got, tc = select_subtrees(ix, target, total, excluded=excluded)
         if sum(labels.values()) == 0:
             break

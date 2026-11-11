@@ -207,16 +207,17 @@ def selected_rows(ix, labels):
     return rows
 
 
-def find_multiple_subsets(ix, target, total, tvd_threshold, max_subsets=50):
-    """Extract disjoint subsets that each match `target` at cardinality `total`.
+def find_multiple_subsets(ix, target, total, tvd_threshold):
+    """Extract disjoint subsets that each match `target` at cardinality `total`,
+    run to exhaustion.
 
     Find the first subset (+ its rule), exclude its leaves, find the next from the
     remaining leaves, and so on -- stopping once the best achievable subset exceeds
-    `tvd_threshold` (or nothing more can be selected).  Returns a list of dicts with
+    `tvd_threshold` or nothing more can be selected.  Returns a list of dicts with
     labels, got, tc, tvd, red (rule), and rows.
     """
     excluded, results = set(), []
-    while len(results) < max_subsets:
+    while True:
         labels, got, tc = select_subtrees(ix, target, total, excluded=excluded)
         if sum(labels.values()) == 0:
             break
