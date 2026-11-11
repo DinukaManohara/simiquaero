@@ -21,10 +21,9 @@ from tkinter import ttk, scrolledtext, filedialog, messagebox
 
 
 from quaero_core import (bin_target, _bin_centers, make_pdf, build_index,
-                         find_multiple_subsets, selected_rows, find_best_boxes,
+                         find_multiple_subsets, find_multiple_box_subsets,
                          default_dataset, read_dataset, target_candidates,
-                         prepare_frame, simplify_rule, rule_to_str,
-                         rank_by_rule_length)
+                         prepare_frame, rule_to_str, rank_by_rule_length)
 
 
 # ----------------------------------------------------------------------------
@@ -227,7 +226,7 @@ class QueryUI:
 
         ttk.Button(body, text="Query by cardinality (subsets)", command=self._process).grid(
             row=14, column=0, columnspan=2, pady=(8, 2), sticky="we")
-        ttk.Button(body, text="Query by # boxes (best match)", command=self._process_boxes).grid(
+        ttk.Button(body, text="Query by # boxes (subsets)", command=self._process_boxes).grid(
             row=15, column=0, columnspan=2, pady=(0, 8), sticky="we")
 
         ttk.Label(body, text="Results (select to view)").grid(
@@ -379,22 +378,30 @@ class QueryUI:
         p = self._target_props()
         if p is None:
             self.status.set("Add at least one distribution component first."); return
+        try:
+            thr = float(self.tvd_thr.get())
+        except ValueError:
+            self.status.set("Invalid TVD threshold."); return
         target = {b: float(p[b]) for b in range(self.n_bins)}
         k = int(self.n_boxes.get())
-        self.status.set(f"Searching best {k} box(es) …"); self.root.update_idletasks()
-        res = find_best_boxes(self.ix, target, k)
-        res["rows"] = selected_rows(self.ix, res["labels"])
-        res["simple"] = simplify_rule(res["red"]["dnf"])        # sympy reduction
-        self.subsets = [res]
+        self.status.set(f"Searching {k}-box subsets …"); self.root.update_idletasks()
+        self.subsets = rank_by_rule_length(find_multiple_box_subsets(self.ix, target, k, thr))
+
         self.subset_list.delete(0, "end")
-        self.subset_list.insert(
-            "end", f"{res['n_boxes']} box(es) → {res['simple']['n_terms']} terms / "
-                   f"{res['simple']['n_literals']} lits: {len(res['rows'])} rows, "
-                   f"TVD={res['tvd']:.3f}")
-        self.subset_list.selection_clear(0, "end"); self.subset_list.selection_set(0)
-        self._show_subset(0)
-        self.status.set(f"Best {res['n_boxes']} box(es): TVD={res['tvd']:.3f}, "
-                        f"simplified to {res['simple']['n_terms']} term(s).")
+        for i, s in enumerate(self.subsets):
+            self.subset_list.insert(
+                "end", f"#{i + 1}: {k} box(es) → {s['simple']['n_terms']} terms / "
+                       f"{s['simple']['n_literals']} lits: {len(s['rows'])} rows, "
+                       f"TVD={s['tvd']:.3f}")
+        if self.subsets:
+            self.subset_list.selection_clear(0, "end"); self.subset_list.selection_set(0)
+            self._show_subset(0)
+            self.status.set(f"Found {len(self.subsets)} disjoint {k}-box subset(s) under "
+                            f"TVD {thr:.3f}, sorted by rule length.")
+        else:
+            self.ax_hist.clear(); self.canvas.draw()
+            self.rule.delete("1.0", "end")
+            self.status.set(f"No {k}-box subset achievable under TVD {thr:.3f}.")
 
     def _on_subset_select(self, event):
         sel = self.subset_list.curselection()

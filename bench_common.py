@@ -253,16 +253,33 @@ def _leaf_intervals(ix):
     return lo, hi
 
 
-def find_best_boxes(ix, target, n_boxes, beam=16, cand_cap=3000):
-    """Query by fixed number of boxes: n_boxes disjoint subtrees whose union's
-    bin distribution is closest (min TVD) to `target`.  Beam search.
+def free_nodes(ix, excluded, order):
+    """Nodes from `order` whose subtrees avoid every excluded (lo, hi) leaf-index
+    interval, keeping order.  Used leaves are marked once (difference array +
+    prefix sums), so each node is tested in O(1)."""
+    lo, hi = ix["leaf_iv"]
+    if excluded:
+        nl = len(ix["leaves"])
+        diff = np.zeros(nl + 1, dtype=np.int64)
+        for c, d in excluded:
+            diff[c] += 1; diff[d + 1] -= 1
+        pre = np.concatenate([[0], np.cumsum(np.cumsum(diff)[:nl] > 0)])
+        ok = lambda v: pre[hi[v] + 1] == pre[lo[v]]
+    else:
+        ok = lambda v: True
+    return [v for v in order if ok(v)]
 
-    On large (near-O(n)-node) trees the candidate set is capped to the
-    `cand_cap` heaviest nodes so the per-step cost stays bounded."""
-    lo, hi = _leaf_intervals(ix)
-    nodes = [v for v in range(ix["n"]) if sum(ix["node_cnt"][v].values()) > 0]
-    if len(nodes) > cand_cap:                                    # keep the heaviest nodes
-        nodes = sorted(nodes, key=lambda v: -sum(ix["node_cnt"][v].values()))[:cand_cap]
+
+def find_best_boxes(ix, target, n_boxes, beam=16, excluded=()):
+    """Query by fixed number of boxes: n_boxes disjoint subtrees whose union's
+    bin distribution is closest (min TVD) to `target`.  Beam search over every
+    non-empty node.  `excluded`: (lo, hi) leaf-index intervals used by earlier
+    subsets; no chosen box may overlap them."""
+    if "leaf_iv" not in ix:
+        ix["leaf_iv"] = _leaf_intervals(ix)
+    lo, hi = ix["leaf_iv"]
+    nodes = free_nodes(ix, list(excluded),
+                       [v for v in range(ix["n"]) if sum(ix["node_cnt"][v].values()) > 0])
     states = [(1.0, (), [], {})]
     for _ in range(n_boxes):
         cand = {}
@@ -286,4 +303,17 @@ def find_best_boxes(ix, target, n_boxes, beam=16, cand_cap=3000):
     tvd, chosen, occ, got = states[0]
     dnf = [ix["path_predicate"](v) for v in chosen]
     return dict(chosen=list(chosen), got=got, tc=dict(target), tvd=tvd,
-                dnf=dnf, n_boxes=len(chosen))
+                dnf=dnf, n_boxes=len(chosen), intervals=[(lo[v], hi[v]) for v in chosen])
+
+
+def find_multiple_box_subsets(ix, target, n_boxes, tvd_threshold, beam=16):
+    """Disjoint K-box subsets, run to exhaustion (TVD threshold exceeded or
+    fewer than n_boxes disjoint boxes left)."""
+    excluded, results = [], []
+    while True:
+        res = find_best_boxes(ix, target, n_boxes, beam, excluded)
+        if res["n_boxes"] < n_boxes or res["tvd"] > tvd_threshold:
+            break
+        results.append(res)
+        excluded += res["intervals"]
+    return results

@@ -2,11 +2,16 @@
 
 This is the "query by number of boxes" mode: fix K = number of bounding boxes
 (disjoint subtrees, one DNF conjunct each -> rule length is FIXED at K) and find
-the K boxes whose union's bin-distribution is closest (min TVD) to the target.
-We record the achieved TVD (the quality at the fixed rule length).
+disjoint K-box subsets, run to exhaustion: the K boxes whose union's
+bin-distribution is closest (min TVD) to the target, then the best K among the
+leaves not yet used, and so on, until the next result's TVD exceeds --tvd or
+fewer than K disjoint boxes remain.  query_sec times that whole loop.  The
+subsets are then simplified (sympy) and ranked terms -> literals -> TVD, timed
+separately as simplify_sec; the CSV row reports the number of subsets and the
+top-ranked subset's rule length and distribution metrics.
 
 Run one (rows, cols) config per invocation and append to a CSV:
-  python dt_rule_length_fixed.py --rows R [--cols C] [--boxes K]
+  python dt_rule_length_fixed.py --rows R [--cols C] [--boxes K] [--tvd T]
 
 Sweeps to reproduce (drive with a shell loop):
   rows in 1024,2048,...,1024000  with  --cols 16   (row scaling)
@@ -16,11 +21,11 @@ import argparse
 import time
 
 from bench_common import (make_dataset, build_index, gaussian_target,
-                          find_best_boxes, dist_metrics, append_csv)
+                          find_multiple_box_subsets, dist_metrics, append_csv)
 from quaero_core import simplify_rule
 
 
-def run(n_rows, n_cols, n_boxes, seed, warmup, repeats):
+def run(n_rows, n_cols, n_boxes, tvd_threshold, seed, warmup, repeats):
     df, target_col = make_dataset(n_rows, n_cols, seed=seed)
 
     t0 = time.perf_counter()
@@ -30,25 +35,37 @@ def run(n_rows, n_cols, n_boxes, seed, warmup, repeats):
 
     target = gaussian_target(df, target_col, n_bins)
 
-    # repeat only the fixed-K box query and, timed separately, the sympy rule
-    # simplification; build stays out of the timed loop
-    query_secs, simp_secs, res, simple = [], [], None, None
+    # timed: the full query = every disjoint K-box subset until exhaustion;
+    # then, timed separately, simplifying + ranking all of them
+    query_secs, simp_secs, ranked = [], [], []
     for r in range(warmup + repeats):
         t1 = time.perf_counter()
-        res = find_best_boxes(ix, target, n_boxes=n_boxes)   # fixed-K box query
+        found = find_multiple_box_subsets(ix, target, n_boxes, tvd_threshold)
         dq = time.perf_counter() - t1
         t2 = time.perf_counter()
-        simple = simplify_rule(res["dnf"])                   # sympy reduction
+        for s in found:
+            s["simple"] = simplify_rule(s["dnf"])            # sympy reduction
+        ranked = sorted(found, key=lambda s: (s["simple"]["n_terms"],
+                                              s["simple"]["n_literals"], s["tvd"]))
         ds = time.perf_counter() - t2
         if r >= warmup:
             query_secs.append(dq); simp_secs.append(ds)
 
-    selected = sum(sum(ix["node_cnt"][v].values()) for v in res["chosen"])
+    rows_of = lambda s: sum(sum(ix["node_cnt"][v].values()) for v in s["chosen"])
     base = dict(approach="dt_rule_length_fixed", n_rows=n_rows, n_cols=n_cols,
                 seed=seed, n_bins=n_bins, tree_nodes=ix["n"], leaves=len(ix["leaves"]),
-                n_boxes=res["n_boxes"], rule_length=res["n_boxes"], selected=selected,
-                simp_terms=simple["n_terms"], literals=simple["n_literals"],
-                **dist_metrics(res["got"], res["tc"]), build_sec=round(build_sec, 4))
+                n_boxes=n_boxes, tvd_threshold=tvd_threshold,
+                n_subsets=len(ranked), total_selected=sum(rows_of(s) for s in ranked),
+                build_sec=round(build_sec, 4))
+    if ranked:                                    # the top-ranked subset's rule + metrics
+        best = ranked[0]
+        base.update(selected=rows_of(best), rule_length=best["n_boxes"],
+                    simp_terms=best["simple"]["n_terms"],
+                    literals=best["simple"]["n_literals"],
+                    **dist_metrics(best["got"], best["tc"]))
+    else:
+        base.update(selected=None, rule_length=None, simp_terms=None, literals=None,
+                    tvd=None, jsd=None, kld=None, hellinger=None, bc=None)
     return base, query_secs, simp_secs
 
 
@@ -57,23 +74,25 @@ def main():
     ap.add_argument("--rows", type=int, default=32000)
     ap.add_argument("--cols", type=int, default=16)
     ap.add_argument("--boxes", type=int, default=4, help="fixed number of bounding boxes")
+    ap.add_argument("--tvd", type=float, default=0.15,
+                    help="TVD threshold: keep finding disjoint K-box subsets until exceeded")
     ap.add_argument("--warmup", type=int, default=2, help="unrecorded warm-up queries")
     ap.add_argument("--repeats", type=int, default=3, help="recorded queries (one CSV row each)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="dt_rule_length_fixed_results.csv")
     args = ap.parse_args()
 
-    base, query_secs, simp_secs = run(args.rows, args.cols, args.boxes, args.seed,
-                                      args.warmup, args.repeats)
+    base, query_secs, simp_secs = run(args.rows, args.cols, args.boxes, args.tvd,
+                                      args.seed, args.warmup, args.repeats)
     for rep, (q, s) in enumerate(zip(query_secs, simp_secs)):   # one row per recorded query
         append_csv(args.out, dict(rep=rep, query_sec=round(q, 4),
                                   simplify_sec=round(s, 4), **base))
     mean = sum(query_secs) / len(query_secs) if query_secs else float("nan")
     smean = sum(simp_secs) / len(simp_secs) if simp_secs else float("nan")
-    print(f"[dt-fixed] rows={args.rows} cols={args.cols} boxes={base['n_boxes']} "
-          f"-> {base['simp_terms']} simplified  TVD={base['tvd']}  build={base['build_sec']}s "
-          f"query_mean={mean:.4f}s simplify_mean={smean:.4f}s over {len(query_secs)} run(s)"
-          f"  -> {args.out}")
+    print(f"[dt-fixed] rows={args.rows} cols={args.cols} boxes={args.boxes} tvd<={args.tvd}  "
+          f"subsets={base['n_subsets']}  best: {base['simp_terms']} terms, TVD={base['tvd']}  "
+          f"build={base['build_sec']}s query_mean={mean:.4f}s simplify_mean={smean:.4f}s "
+          f"over {len(query_secs)} run(s)  -> {args.out}")
 
 
 if __name__ == "__main__":

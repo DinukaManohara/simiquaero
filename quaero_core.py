@@ -6,7 +6,8 @@ does not touch tkinter or the matplotlib backend.
 
   load:   read_dataset -> target_candidates -> prepare_frame
   index:  build_index  (Scott's-rule target bins, purity-grown decision tree)
-  query:  find_multiple_subsets (by cardinality)  |  find_best_boxes (by #boxes)
+  query:  find_multiple_subsets (by cardinality)  |
+          find_multiple_box_subsets / find_best_boxes (by #boxes)
   rule:   reduce_labeling -> simplify_rule (sympy) -> rule_to_str
   rank:   rank_by_rule_length (shortest simplified rule first)
 """
@@ -20,6 +21,7 @@ from scipy import stats as scipy_stats
 from sklearn.tree import DecisionTreeClassifier
 
 from bench_common import dist_metrics      # TVD / JSD / KLD / Hellinger / BC
+from bench_common import free_nodes        # O(1) per-node test against used leaves
 
 
 # ----------------------------------------------------------------------------
@@ -354,16 +356,22 @@ def _leaf_intervals(ix):
     return lo, hi
 
 
-def find_best_boxes(ix, target, n_boxes, beam=16):
+def find_best_boxes(ix, target, n_boxes, beam=16, excluded=()):
     """Query by NUMBER OF BOXES: find `n_boxes` disjoint subtrees (bounding boxes,
     one DNF conjunct each) whose union's bin distribution is CLOSEST (min TVD) to
     `target` proportions.  Beam search over disjoint node combinations.
 
     Unlike the cardinality query, there is no size target -- the objective is the
     distributional match of exactly n_boxes boxes in disjunction.
+
+    `excluded`: (lo, hi) leaf-index intervals already used by earlier subsets;
+    no chosen box may overlap them.
     """
-    lo, hi = _leaf_intervals(ix)
-    nodes = [v for v in range(ix["n"]) if sum(ix["node_cnt"][v].values()) > 0]
+    if "leaf_iv" not in ix:
+        ix["leaf_iv"] = _leaf_intervals(ix)
+    lo, hi = ix["leaf_iv"]
+    nodes = free_nodes(ix, list(excluded),
+                       [v for v in range(ix["n"]) if sum(ix["node_cnt"][v].values()) > 0])
     states = [(1.0, (), [], {})]                # (tvd, chosen, occupied intervals, got)
     for _ in range(n_boxes):
         cand = {}
@@ -393,7 +401,23 @@ def find_best_boxes(ix, target, n_boxes, beam=16):
     red = dict(dnf=dnf, n_terms=len(chosen), antichain=list(chosen),
                reduced_size=len(chosen), node_label=None)
     return dict(labels=labels, got=got, tc=dict(target), tvd=tvd, red=red,
-                n_boxes=len(chosen))
+                n_boxes=len(chosen), intervals=[(lo[v], hi[v]) for v in chosen])
+
+
+def find_multiple_box_subsets(ix, target, n_boxes, tvd_threshold, beam=16):
+    """Disjoint K-box subsets, run to exhaustion: the best `n_boxes` boxes, then
+    the best among the leaves not yet used, and so on, until the next result's
+    TVD exceeds `tvd_threshold` or fewer than `n_boxes` disjoint boxes remain.
+    Returns the same dicts as find_best_boxes, plus "rows"."""
+    excluded, results = [], []
+    while True:
+        res = find_best_boxes(ix, target, n_boxes, beam=beam, excluded=excluded)
+        if res["n_boxes"] < n_boxes or res["tvd"] > tvd_threshold:
+            break
+        res["rows"] = selected_rows(ix, res["labels"])
+        results.append(res)
+        excluded += res["intervals"]
+    return results
 
 
 # ----------------------------------------------------------------------------
