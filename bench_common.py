@@ -297,7 +297,7 @@ def find_best_boxes(ix, target, n_boxes, beam=16, excluded=()):
                     g2[bb] = g2.get(bb, 0) + k
                 key = frozenset(chosen + (v,))
                 t = tv_distance(g2, target)
-                if key not in cand or t < cand[key][0]:
+                if key not in cand:                    # same set reached in another order
                     cand[key] = (t, chosen + (v,), occ + [(a, b)], g2)
         if not cand:
             break
