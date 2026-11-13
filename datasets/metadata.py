@@ -5,7 +5,10 @@ uci_datasets_info = {
         "target_variable": [
             "machine_failure",
             "failure_type",
-            "remaining_useful_life_hours"
+            "remaining_useful_life_hours",
+            "machine_health_score", 
+            "failure_probability", 
+            "maintenance_priority"
         ],
         "categorical_variables": [
             "factory_id",
