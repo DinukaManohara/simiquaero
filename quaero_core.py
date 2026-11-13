@@ -53,24 +53,28 @@ DISTRIBUTIONS = {
     "beta": scipy_stats.beta,
     "weibull": scipy_stats.weibull_min,                  # shape k, scale lambda, loc
     "lognormal": scipy_stats.lognorm, "log-normal": scipy_stats.lognorm,
+    "pareto": scipy_stats.pareto,                        # alpha, scale (= x_min), loc
 }
 
 
 def _component(name, params):
     """(scipy distribution, scipy kwargs) for one mixture component.  Weibull
     takes shape/scale/loc; Log-Normal takes mu/sigma/loc with
-    ln(X - loc) ~ N(mu, sigma^2).  scipy's own names (c, s) pass through."""
+    ln(X - loc) ~ N(mu, sigma^2); Pareto takes alpha/scale/loc with support
+    x >= loc + scale.  scipy's own names (c, s, b) pass through."""
     key = name.lower()
     if key not in DISTRIBUTIONS:
         raise ValueError(f"unknown distribution {name!r}; choose from "
                          f"{', '.join(sorted(DISTRIBUTIONS))}")
-    bad = [k for k in ("scale", "shape", "sigma", "c", "s", "a", "b")
+    bad = [k for k in ("scale", "shape", "sigma", "alpha", "c", "s", "a", "b")
            if k in params and params[k] <= 0]                # report the names as typed
     if bad:
         raise ValueError(f"{name}: {', '.join(bad)} must be > 0")
     p = dict(params)
     if key == "weibull" and "shape" in p:
         p["c"] = p.pop("shape")
+    if key == "pareto" and "alpha" in p:
+        p["b"] = p.pop("alpha")
     if key in ("lognormal", "log-normal"):
         if "sigma" in p:
             p["s"] = p.pop("sigma")

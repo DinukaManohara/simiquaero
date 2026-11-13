@@ -91,6 +91,7 @@ DIST_PARAMS = {
     "beta":        [("a",   "2.0"),   ("b",     "2.0")],
     "weibull":     [("shape", "1.5"), ("scale", "0.30"), ("loc", "0.0")],
     "lognormal":   [("mu",  "-1.0"),  ("sigma", "0.5"),  ("loc", "0.0")],
+    "pareto":      [("alpha", "3.0"), ("scale", "0.10"), ("loc", "0.0")],
 }
 MAX_PARAMS = max(len(v) for v in DIST_PARAMS.values())
 
