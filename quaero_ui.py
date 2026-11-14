@@ -310,10 +310,9 @@ class QueryUI:
         right.rowconfigure(0, weight=2)          # figures  (was the whole panel)
         right.rowconfigure(2, weight=3)          # rule     (now the larger share)
 
-        self.fig = Figure(figsize=(6.5, 3.6), dpi=MPL_DPI)
+        self.fig = Figure(figsize=(6.5, 3.6), dpi=MPL_DPI, layout="constrained")
         self.ax_pdf = self.fig.add_subplot(211)
-        self.ax_hist = self.fig.add_subplot(212)
-        self.fig.tight_layout(pad=2.0)
+        self.ax_hist = self.fig.add_subplot(212, sharex=self.ax_pdf)
         self.canvas = FigureCanvasTkAgg(self.fig, master=right)
         self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
@@ -381,8 +380,8 @@ class QueryUI:
             self.ax_pdf.set_title("Specified target pdf")
         else:
             self.ax_pdf.set_title("Specified target pdf — add a component")
-        self.ax_pdf.set_xlabel(self.target_col); self.ax_pdf.set_yticks([])
-        self.fig.tight_layout(pad=2.0); self.canvas.draw()
+        self.ax_pdf.set_yticks([])                 # x label only on the bottom plot
+        self.canvas.draw()
         self._feasibility()
 
     def _feasibility(self):
@@ -490,11 +489,12 @@ class QueryUI:
         self.ax_hist.plot(xs, [pdf(x) for x in xs], "--", color=CB_palette["CBdarkgrey"],
                           lw=1.3, label="specified pdf")
         simple = s["simple"]
-        self.ax_hist.set_title(f"Subset #{i + 1} — TVD={s['tvd']:.3f}, "
-                               f"{simple['n_terms']} terms / {simple['n_literals']} lits")
         self.ax_hist.set_xlabel(self.target_col); self.ax_hist.set_yticks([])
-        self.ax_hist.legend()
-        self.fig.tight_layout(pad=2.0); self.canvas.draw()
+        # legend as a row above the plot (its subset/TVD/terms info is in the rule header)
+        self.ax_hist.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=3,
+                            frameon=False, borderaxespad=0.2,
+                            handlelength=1.5, columnspacing=1.0)
+        self.canvas.draw()
 
         self.rule.delete("1.0", "end")
         self.rule.insert("end",
