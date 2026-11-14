@@ -7,11 +7,15 @@ Right panel: live pdf preview, result histogram, and the induced DNF rule.
 Backend: the decision-tree pipeline (index -> subtree-first selection -> lossless
 reduction to a DNF rule) lives in quaero_core.py, shared with case_study_dt.ipynb.
 """
+import os
+import sys
+import tempfile
 from datetime import datetime
 import numpy as np
 
 import matplotlib
 matplotlib.use("TkAgg")
+import matplotlib.font_manager as fm
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
@@ -24,11 +28,12 @@ from quaero_core import (bin_target, _bin_centers, make_pdf, build_index,
                          find_multiple_subsets, find_multiple_box_subsets,
                          default_dataset, read_dataset, target_candidates,
                          prepare_frame, rule_to_str, rank_by_rule_length)
-from plot_style import CB_palette          # palette only; the UI keeps Courier
+from plot_style import CB_palette          # palette only; the UI sets its own fonts
 
 
 # ----------------------------------------------------------------------------
-# UI typography: Courier, sized so window captures stay legible in the paper.
+# UI typography: Linux Libertine Bold (falls back to Courier if unavailable),
+# sized so window captures stay legible in the paper.
 # A capture of the WINDOW_PX-wide window is placed at \textwidth (DOC_WIDTH_PT);
 # fonts are sized so text then prints at PRINT_PT (\footnotesize at 10pt).
 #   printed size = font pt x (screen px per pt) x DOC_WIDTH_PT / window px
@@ -37,8 +42,34 @@ from plot_style import CB_palette          # palette only; the UI keeps Courier
 DOC_WIDTH_PT = 516.0          # \textwidth of the paper
 PRINT_PT = 8                  # \footnotesize at 10pt: printed text size we want
 WINDOW_PX = (1200, 960)       # fixed window size (only the width sets the font)
-UI_FONT_FAMILIES = ["Courier", "Courier New", "Nimbus Mono PS", "Liberation Mono"]
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "LinLibertineTTF")
+LIBERTINE_BOLD = os.path.join(FONT_DIR, "LinLibertine_RBah.ttf")
+UI_FONT_FAMILIES = ["Linux Libertine", "Linux Libertine O",          # preferred
+                    "Courier", "Courier New", "Nimbus Mono PS", "Liberation Mono"]
+UI_FONT_WEIGHT = "bold"
 MPL_DPI = 100                 # dpi of the embedded matplotlib figure
+
+
+def register_repo_fonts():
+    """Linux: make the repo's Libertine TTFs visible to Tk for this process,
+    without installing them, by pointing fontconfig at a config that includes
+    the system fonts plus FONT_DIR.  Must run before the first tk.Tk().
+    Does nothing on other platforms or if FONTCONFIG_FILE is already set."""
+    if not sys.platform.startswith("linux") or "FONTCONFIG_FILE" in os.environ:
+        return
+    if not os.path.isdir(FONT_DIR):
+        return
+    conf = os.path.join(tempfile.gettempdir(), f"quaero-fonts-{os.getuid()}.conf")
+    with open(conf, "w") as f:
+        f.write('<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
+                '<fontconfig>\n'
+                '  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>\n'
+                f'  <dir>{FONT_DIR}</dir>\n'
+                '</fontconfig>\n')
+    os.environ["FONTCONFIG_FILE"] = conf
+
+
+register_repo_fonts()          # at import time, i.e. before QueryUI creates tk.Tk()
 
 
 def ui_font_pt(root):
@@ -54,9 +85,16 @@ def mpl_font_pt(dpi):
 
 
 _MPL_PT = mpl_font_pt(MPL_DPI)
+# embedded plots: load the bold Libertine TTF directly (falls back to monospace)
+if os.path.exists(LIBERTINE_BOLD):
+    fm.fontManager.addfont(LIBERTINE_BOLD)
+    _MPL_FAMILY = [fm.FontProperties(fname=LIBERTINE_BOLD).get_name()]
+else:
+    _MPL_FAMILY = ["monospace"]
 matplotlib.rcParams.update({
-    "font.family": "monospace",
-    "font.monospace": UI_FONT_FAMILIES + ["DejaVu Sans Mono"],
+    "font.family": _MPL_FAMILY,
+    "font.monospace": UI_FONT_FAMILIES[2:] + ["DejaVu Sans Mono"],
+    "font.weight": "bold", "axes.titleweight": "bold", "axes.labelweight": "bold",
     "font.size": _MPL_PT,
     "axes.titlesize": _MPL_PT,
     "axes.labelsize": _MPL_PT,
@@ -67,16 +105,17 @@ matplotlib.rcParams.update({
 
 
 def apply_ui_font(root):
-    """Point every Tk named font at Courier, sized for legible captures.
-    Returns (family, size_pt)."""
+    """Point every Tk named font at Linux Libertine Bold (or the first available
+    fallback), sized for legible captures.  Returns (family, size_pt)."""
     available = set(tkfont.families(root))
     family = next((f for f in UI_FONT_FAMILIES if f in available), "Courier")
     size = ui_font_pt(root)
     for name in ("TkDefaultFont", "TkTextFont", "TkFixedFont", "TkMenuFont",
                  "TkHeadingFont", "TkCaptionFont", "TkSmallCaptionFont",
                  "TkIconFont", "TkTooltipFont"):
-        tkfont.nametofont(name, root=root).configure(family=family, size=size)
-    root.option_add("*TCombobox*Listbox.font", (family, size))
+        tkfont.nametofont(name, root=root).configure(family=family, size=size,
+                                                     weight=UI_FONT_WEIGHT)
+    root.option_add("*TCombobox*Listbox.font", (family, size, UI_FONT_WEIGHT))
     return family, size
 
 
