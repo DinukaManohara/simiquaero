@@ -428,7 +428,7 @@ def find_multiple_box_subsets(ix, target, n_boxes, tvd_threshold, beam=16):
 # ----------------------------------------------------------------------------
 # Default dataset (swap in your own df + target_col at the bottom)
 # ----------------------------------------------------------------------------
-def default_dataset(N=1500, seed=42):
+def default_dataset(N=20000, seed=42):
     rng = np.random.default_rng(seed)
     centers = rng.uniform(0, 1, size=(4, 3))
     assign = rng.integers(0, 4, size=N)

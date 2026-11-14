@@ -41,7 +41,7 @@ from plot_style import CB_palette          # palette only; the UI sets its own f
 # ----------------------------------------------------------------------------
 DOC_WIDTH_PT = 516.0          # \textwidth of the paper
 PRINT_PT = 8                  # \footnotesize at 10pt: printed text size we want
-WINDOW_PX = (1200, 960)       # fixed window size (only the width sets the font)
+WINDOW_PX = (1920, 1200)       # fixed window size (only the width sets the font)
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "LinLibertineTTF")
 LIBERTINE_BOLD = os.path.join(FONT_DIR, "LinLibertine_RBah.ttf")
 UI_FONT_FAMILIES = ["Linux Libertine", "Linux Libertine O",          # preferred
