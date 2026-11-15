@@ -8,7 +8,8 @@ Each CSV row (one per K and recorded rep) holds the number of subsets, the
 top-ranked subset's rule length and distribution metrics, and the mean/std of
 each metric across all subsets found ({tvd,jsd,kld,hellinger,bc}_{mean,std}).
 
-  python dt_terms.py [--rows 32000] [--cols 17] [--terms 1 2 4 8] [--tvd T]
+  python dt_terms.py [--rows 32000] [--cols 17] [--terms 1 2 4 8]
+                     [--tvd T | --tvd T1 T2 ...]      (one threshold, or one per K)
 """
 import argparse
 import time
@@ -69,13 +70,16 @@ def main():
     ap.add_argument("--cols", type=int, default=17, help="descriptors + 1 target")
     ap.add_argument("--terms", type=int, nargs="+", default=[1, 2, 4, 8],
                     help="numbers of terms (boxes) K to run")
-    ap.add_argument("--tvd", type=float, default=0.15,
-                    help="TVD threshold: keep finding disjoint K-box subsets until exceeded")
+    ap.add_argument("--tvd", type=float, nargs="+", default=[0.15],
+                    help="TVD threshold(s): one for every K, or one per K in --terms order")
     ap.add_argument("--warmup", type=int, default=2, help="unrecorded warm-up queries")
     ap.add_argument("--repeats", type=int, default=3, help="recorded queries (one CSV row each)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="dt_terms.csv")
     args = ap.parse_args()
+    if len(args.tvd) not in (1, len(args.terms)):
+        ap.error(f"--tvd takes 1 value or {len(args.terms)} (one per K); got {len(args.tvd)}")
+    thresholds = args.tvd * len(args.terms) if len(args.tvd) == 1 else args.tvd
 
     df, target_col = make_dataset(args.rows, args.cols, seed=args.seed)
     t0 = time.perf_counter()
@@ -83,18 +87,18 @@ def main():
     build_sec = time.perf_counter() - t0
     target = gaussian_target(df, target_col, ix["n_bins"])
 
-    for k in args.terms:
-        ranked, query_secs, simp_secs = run_k(ix, target, k, args.tvd,
+    for k, thr in zip(args.terms, thresholds):
+        ranked, query_secs, simp_secs = run_k(ix, target, k, thr,
                                               args.warmup, args.repeats)
         base = dict(approach="dt_terms", n_rows=args.rows, n_cols=args.cols,
                     seed=args.seed, n_bins=ix["n_bins"], tree_nodes=ix["n"],
-                    leaves=len(ix["leaves"]), n_boxes=k, tvd_threshold=args.tvd,
+                    leaves=len(ix["leaves"]), n_boxes=k, tvd_threshold=thr,
                     build_sec=round(build_sec, 4), **summarize(ix, ranked))
         for rep, (q, s) in enumerate(zip(query_secs, simp_secs)):
             append_csv(args.out, dict(rep=rep, query_sec=round(q, 4),
                                       simplify_sec=round(s, 4), **base))
         mean = sum(query_secs) / len(query_secs) if query_secs else float("nan")
-        print(f"[dt-terms] rows={args.rows} cols={args.cols} K={k} tvd<={args.tvd}  "
+        print(f"[dt-terms] rows={args.rows} cols={args.cols} K={k} tvd<={thr}  "
               f"subsets={base['n_subsets']}  best TVD={base['tvd']}  "
               f"query_mean={mean:.2f}s  -> {args.out}")
 
