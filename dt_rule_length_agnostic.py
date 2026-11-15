@@ -8,7 +8,8 @@ subset's TVD exceeds --tvd); query_sec times that whole loop.  The subsets are
 then simplified (sympy) and ranked terms -> literals -> TVD, timed separately as
 simplify_sec; the CSV row reports the number of subsets and the top-ranked
 subset's rule length (number of DNF terms -- the decision-tree analogue of
-"islands") and distribution metrics.
+"islands") and distribution metrics, plus the mean/std of each metric across
+all subsets found ({tvd,jsd,kld,hellinger,bc}_{mean,std}).
 
 Run one (rows, cols) config per invocation and append to a CSV:
   python dt_rule_length_agnostic.py --rows R [--cols C] [--pct P] [--tvd T]
@@ -20,9 +21,13 @@ Sweeps to reproduce (drive with a shell loop):
 import argparse
 import time
 
+import numpy as np
+
 from bench_common import (make_dataset, build_index, gaussian_target,
                           find_multiple_subsets, dist_metrics, append_csv)
 from quaero_core import simplify_rule
+
+METRICS = ("tvd", "jsd", "kld", "hellinger", "bc")
 
 
 def run(n_rows, n_cols, pct, tvd_threshold, seed, warmup, repeats):
@@ -66,6 +71,14 @@ def run(n_rows, n_cols, pct, tvd_threshold, seed, warmup, repeats):
     else:
         base.update(selected=None, rule_length=None, simp_terms=None, literals=None,
                     tvd=None, jsd=None, kld=None, hellinger=None, bc=None)
+
+    # accuracy across ALL subsets found (identical in every rep: computed once, untimed);
+    # std is left empty when there is a single subset
+    per_subset = [dist_metrics(s["got"], s["tc"]) for s in ranked]
+    for key in METRICS:
+        vals = np.array([m[key] for m in per_subset], dtype=float)
+        base[f"{key}_mean"] = round(float(vals.mean()), 4) if len(vals) else None
+        base[f"{key}_std"] = round(float(vals.std(ddof=1)), 4) if len(vals) > 1 else None
     return base, query_secs, simp_secs
 
 
